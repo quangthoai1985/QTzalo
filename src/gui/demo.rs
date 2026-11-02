@@ -158,7 +158,7 @@ impl DemoWorkspace {
             msg("d7", "Bạn", "[Video] demo-onboarding.mp4", now - 21 * min, true),
             msg("d5", "Lan Phương", "[Tập tin] QTzalo-landing.fig", now - 12 * min, false),
         ];
-        g1[1].reactions = vec![
+        g1[4].reactions = vec![
             crate::reaction::MsgReaction { uid: "lan".into(), emoji: "❤️".into(), ts: 1 },
             crate::reaction::MsgReaction { uid: "0".into(), emoji: "❤️".into(), ts: 2 },
         ];

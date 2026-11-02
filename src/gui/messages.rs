@@ -1834,10 +1834,12 @@ pub(super) fn render_chat_bubble(
         if paint_reaction_chip(ui, bubble_resp.rect, msg, pal, emoji_textures) {
             ui.add_space(10.0);
         }
+        let react_action =
+            hover_reaction_controls(ui, bubble_resp.rect, msg, true, pal, emoji_textures);
         if bubble_resp.double_clicked() {
             return Some(BubbleAction::Reply);
         }
-        card_action.or_else(|| {
+        card_action.or(react_action).or_else(|| {
             bubble_context_menu(
                 ui,
                 &bubble_resp,
@@ -1913,10 +1915,12 @@ pub(super) fn render_chat_bubble(
         if paint_reaction_chip(ui, bubble_resp.rect, msg, pal, emoji_textures) {
             ui.add_space(10.0);
         }
+        let react_action =
+            hover_reaction_controls(ui, bubble_resp.rect, msg, false, pal, emoji_textures);
         if bubble_resp.double_clicked() {
             return Some(BubbleAction::Reply);
         }
-        card_action.or_else(|| {
+        card_action.or(react_action).or_else(|| {
             bubble_context_menu(
                 ui,
                 &bubble_resp,
@@ -2073,11 +2077,236 @@ fn paint_reaction_chip(
     true
 }
 
+const REACT_BTN: f32 = 24.0;
+const REACT_GAP: f32 = 6.0;
+const REACT_SLOT: f32 = 34.0;
+const REACT_ICON: f32 = 28.0;
+const REACT_BAR_PAD: f32 = 6.0;
+const REACT_OPEN_DELAY: f64 = 0.25;
+const REACT_CLOSE_GRACE: f64 = 0.2;
+
+/// Hover reaction button: a 24 px circle just outside the bubble, bottom-aligned (right of an
+/// incoming bubble, left of an outgoing one), so it never covers the chip or the time.
+fn react_button_rect(bubble: Rect, outgoing: bool) -> Rect {
+    let x = if outgoing {
+        bubble.left() - REACT_GAP - REACT_BTN
+    } else {
+        bubble.right() + REACT_GAP
+    };
+    Rect::from_min_size(Pos2::new(x, bubble.bottom() - REACT_BTN), Vec2::splat(REACT_BTN))
+}
+
+/// Reaction picker above the button, moved (not shrunk) to stay on screen; below the button
+/// when there is no room above.
+fn react_bar_rect(button: Rect, outgoing: bool, items: usize, screen: Rect) -> Rect {
+    let size = Vec2::new(
+        items as f32 * REACT_SLOT + 2.0 * REACT_BAR_PAD,
+        REACT_SLOT + 2.0 * REACT_BAR_PAD,
+    );
+    let left = if outgoing {
+        button.right() + 8.0 - size.x
+    } else {
+        button.left() - 8.0
+    };
+    let mut bar = Rect::from_min_size(Pos2::new(left, button.top() - REACT_GAP - size.y), size);
+    if bar.top() < screen.top() {
+        bar = bar.translate(Vec2::new(0.0, button.bottom() + REACT_GAP - bar.top()));
+    }
+    if bar.right() > screen.right() {
+        bar = bar.translate(Vec2::new(screen.right() - bar.right(), 0.0));
+    }
+    if bar.left() < screen.left() {
+        bar = bar.translate(Vec2::new(screen.left() - bar.left(), 0.0));
+    }
+    bar
+}
+
+/// Which message's picker is hovered / open. One at a time, kept in egui temp memory.
+#[derive(Clone, Copy, PartialEq)]
+struct ReactBarState {
+    key: Id,
+    open: bool,
+    /// When the pointer entered the button (the picker opens after `REACT_OPEN_DELAY`).
+    hover_since: f64,
+    /// Last time the pointer was on the button or the picker (it closes after
+    /// `REACT_CLOSE_GRACE`).
+    last_inside: f64,
+}
+
+impl Default for ReactBarState {
+    fn default() -> Self {
+        Self { key: Id::NULL, open: false, hover_since: 0.0, last_inside: 0.0 }
+    }
+}
+
+/// Hover button (click = 👍) and the 6-reaction picker (plus ✕ when I reacted) of one bubble.
+fn hover_reaction_controls(
+    ui: &mut egui::Ui,
+    bubble: Rect,
+    msg: &ChatMessage,
+    outgoing: bool,
+    pal: &ThemePalette,
+    emoji_textures: &HashMap<String, TextureHandle>,
+) -> Option<BubbleAction> {
+    if !crate::reaction::can_react(msg) {
+        return None;
+    }
+    let ctx = ui.ctx().clone();
+    let key = Id::new(("react", &msg.id, msg.ts));
+    let state_id = Id::new("qtzalo_react_bar");
+    let mut st: ReactBarState = ctx.data(|d| d.get_temp(state_id)).unwrap_or_default();
+    let before = st;
+    let now = ctx.input(|i| i.time);
+    let button = react_button_rect(bubble, outgoing);
+    let mine = crate::reaction::summary(&msg.reactions).mine;
+    let items = REACTION_LIST.len() + usize::from(mine.is_some());
+    let bar = react_bar_rect(button, outgoing, items, ctx.screen_rect());
+    // Only a pointer over this chat (not a popup, the picker or another window above it) and
+    // inside the visible part of the list counts.
+    let layer = ui.layer_id();
+    let clip = ui.clip_rect();
+    // `QTZALO_DEMO_REACT_BAR=1`: picker open on the demo photo (for screenshots).
+    let demo_forced = is_demo_mode()
+        && msg.id == "d6"
+        && clip.intersects(bubble)
+        && std::env::var("QTZALO_DEMO_REACT_BAR").ok().as_deref() == Some("1");
+    let pointer = ctx.pointer_hover_pos();
+    let over_chat = pointer.filter(|p| clip.contains(*p) && ctx.layer_id_at(*p) == Some(layer));
+    let on_button = over_chat.is_some_and(|p| button.contains(p));
+    let in_zone = over_chat.is_some_and(|p| bubble.union(button).expand(2.0).contains(p));
+    let on_bar = st.key == key && st.open && pointer.is_some_and(|p| bar.contains(p));
+
+    if on_button || on_bar {
+        if st.key != key {
+            st = ReactBarState { key, open: false, hover_since: now, last_inside: now };
+        }
+        st.last_inside = now;
+        if !st.open && on_button && now - st.hover_since >= REACT_OPEN_DELAY {
+            st.open = true;
+        }
+    } else if st.key == key {
+        if !st.open {
+            // Left the button before the picker opened: start over next time.
+            st = ReactBarState::default();
+        } else if now - st.last_inside > REACT_CLOSE_GRACE {
+            st.open = false;
+        }
+    }
+    let popup_open = ui.memory(|m| m.any_popup_open());
+    let bar_open = demo_forced || (st.key == key && st.open && !popup_open);
+    let show = demo_forced || (!popup_open && (in_zone || bar_open));
+    if st.key == key && (!st.open && on_button || st.open && !(on_button || on_bar)) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+    }
+    if !show {
+        if st != before {
+            ctx.data_mut(|d| d.insert_temp(state_id, st));
+        }
+        return None;
+    }
+
+    let mut action = None;
+    let painter = ui.painter().clone();
+    painter.add(
+        egui::epaint::Shadow { offset: Vec2::new(0.0, 1.0), blur: 5.0, spread: 0.0, color: pal.shadow }
+            .as_shape(button, Rounding::same(REACT_BTN / 2.0)),
+    );
+    painter.circle(button.center(), REACT_BTN / 2.0, pal.bg_elevated, Stroke::new(1.0_f32, pal.border));
+    let icon_rect = Rect::from_center_size(button.center(), Vec2::splat(16.0));
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    match (&mine, emoji_textures.get(mine.as_deref().map(emoji_to_tex_key).unwrap_or("like"))) {
+        (Some(_), Some(tex)) => {
+            painter.image(tex.id(), icon_rect, uv, Color32::WHITE);
+        }
+        (None, Some(tex)) => {
+            painter.image(tex.id(), icon_rect, uv, Color32::from_white_alpha(115));
+        }
+        _ => draw_lucide_icon(&painter, button.center(), lucide::SMILE, 14.0, pal.text_secondary),
+    }
+    let btn = ui
+        .interact(button, key.with("btn"), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
+    if btn.clicked() {
+        if mine.as_deref() != Some("👍") {
+            action = Some(BubbleAction::React("👍"));
+        }
+        st.open = false;
+    }
+
+    if bar_open && action.is_none() {
+        egui::Area::new(key.with("bar"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(bar.min)
+            .show(&ctx, |ui| {
+                // Give the area its size so the pointer over it belongs to this layer.
+                ui.allocate_exact_size(bar.size(), Sense::hover());
+                let painter = ui.painter().clone();
+                let rounding = Rounding::same(bar.height() / 2.0);
+                painter.add(
+                    egui::epaint::Shadow { offset: Vec2::new(0.0, 2.0), blur: 10.0, spread: 0.0, color: pal.shadow }
+                        .as_shape(bar, rounding),
+                );
+                painter.rect_filled(bar, rounding, pal.bg_elevated);
+                painter.rect_stroke(bar, rounding, Stroke::new(1.0_f32, pal.border));
+                let mut x = bar.left() + REACT_BAR_PAD;
+                let top = bar.top() + REACT_BAR_PAD;
+                for &(code, tex_key, tooltip) in &REACTION_LIST {
+                    let slot = Rect::from_min_size(Pos2::new(x, top), Vec2::splat(REACT_SLOT));
+                    let resp = ui
+                        .interact(slot, key.with(("bar", tex_key)), Sense::click())
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text(tooltip);
+                    let size = if resp.hovered() { REACT_SLOT } else { REACT_ICON };
+                    let r = Rect::from_center_size(slot.center(), Vec2::splat(size));
+                    match emoji_textures.get(tex_key) {
+                        Some(tex) => {
+                            painter.image(tex.id(), r, uv, Color32::WHITE);
+                        }
+                        None => {
+                            painter.text(
+                                slot.center(),
+                                egui::Align2::CENTER_CENTER,
+                                code,
+                                FontId::proportional(size * 0.7),
+                                pal.text_primary,
+                            );
+                        }
+                    }
+                    if resp.clicked() {
+                        action = Some(BubbleAction::React(code));
+                    }
+                    x += REACT_SLOT;
+                }
+                if mine.is_some() {
+                    let slot = Rect::from_min_size(Pos2::new(x, top), Vec2::splat(REACT_SLOT));
+                    let resp = ui
+                        .interact(slot, key.with("bar_remove"), Sense::click())
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("Gỡ cảm xúc");
+                    let color = if resp.hovered() { pal.danger } else { pal.text_secondary };
+                    draw_lucide_icon(&painter, slot.center(), lucide::X, 18.0, color);
+                    if resp.clicked() {
+                        action = Some(BubbleAction::Unreact);
+                    }
+                }
+            });
+        if action.is_some() {
+            st.open = false;
+        }
+    }
+    if st != before {
+        ctx.data_mut(|d| d.insert_temp(state_id, st));
+    }
+    action
+}
+
 #[derive(Clone, PartialEq)]
 pub(super) enum BubbleAction {
     Reply,
     Forward,
     React(&'static str),
+    /// ✕ in the reaction picker: remove my reaction.
+    Unreact,
     TogglePin,
     ToggleStar,
     DeleteForMe,
@@ -3153,5 +3382,30 @@ mod download_target_tests {
         assert!(download_progress_label(&s, false).starts_with("50% · "));
         let u = DownloadState::InProgress { received: 0, total: None };
         assert_eq!(download_progress_label(&u, false), "Đang tải…");
+    }
+}
+
+#[cfg(test)]
+mod react_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn button_sits_outside_bubble_bottom_aligned() {
+        let bubble = Rect::from_min_max(Pos2::new(100.0, 100.0), Pos2::new(300.0, 160.0));
+        assert_eq!(
+            react_button_rect(bubble, false),
+            Rect::from_min_size(Pos2::new(306.0, 136.0), Vec2::splat(24.0))
+        );
+        assert_eq!(react_button_rect(bubble, true).min, Pos2::new(70.0, 136.0));
+    }
+
+    #[test]
+    fn bar_is_above_button_and_kept_on_screen() {
+        let button = Rect::from_min_size(Pos2::new(10.0, 300.0), Vec2::splat(24.0));
+        let screen = Rect::from_min_max(Pos2::ZERO, Pos2::new(800.0, 600.0));
+        let bar = react_bar_rect(button, true, 7, screen);
+        assert!(bar.left() >= 0.0);
+        assert_eq!(bar.bottom(), 294.0);
+        assert_eq!(bar.width(), 250.0);
     }
 }

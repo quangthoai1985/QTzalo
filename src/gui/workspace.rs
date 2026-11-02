@@ -1467,6 +1467,27 @@ impl ZaloGuiApp {
                                         });
                                     }
                                 }
+                                BubbleAction::Unreact
+                                    if crate::reaction::summary(&m.reactions).mine.is_none() => {}
+                                BubbleAction::Unreact => {
+                                    if let Some(real) = self
+                                        .threads
+                                        .get_mut(self.selected_thread_index)
+                                        .and_then(|t| t.messages.get_mut(idx))
+                                    {
+                                        crate::reaction::set_mine(&mut real.reactions, "");
+                                        self.status_msg = "Đã gỡ cảm xúc".into();
+                                    }
+                                    self.persist_threads_async();
+                                    if let Some(tx) = WORKER_TX.get() {
+                                        let _ = tx.send(WorkerCmd::React {
+                                            to_id: thread_id.clone(),
+                                            is_group,
+                                            msg: m,
+                                            reaction: String::new(),
+                                        });
+                                    }
+                                }
                                 BubbleAction::TogglePin | BubbleAction::ToggleStar => {
                                     if let Some(real) = self
                                         .threads
