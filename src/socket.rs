@@ -60,6 +60,11 @@ pub const CMD_PULL_MSG_518: u16 = 518;
 pub const CMD_HAS_MSG: u16 = 533;
 pub const CMD_PUSH_MISS_MSG: u16 = 534;
 pub const CMD_GET_MSG: u16 = 570;
+/// Reactions: `610_x` / `611_x` are pulled after being offline (1-1 / groups), `612` is pushed
+/// while open (`re-notes/10` §17).
+pub const CMD_PULL_REACT_1_1: u16 = 610;
+pub const CMD_PULL_REACT_GROUP: u16 = 611;
+pub const CMD_PUSH_REACTION: u16 = 612;
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                   (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36";
 

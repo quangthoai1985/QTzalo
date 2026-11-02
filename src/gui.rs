@@ -108,6 +108,8 @@ pub enum GuiEvent {
         ts: i64,
         reaction: String,
     },
+    /// Reaction changes from socket `612/610/611` or `lp_control` (`crate::reaction`).
+    ReactionsReceived(Vec<crate::reaction::ReactionEvent>),
     MessageDeleted {
         thread_id: String,
         msg_id: String,
@@ -1195,6 +1197,11 @@ impl ZaloGuiApp {
                         self.persist_threads_async();
                     }
                     self.status_msg = format!("Đã gửi trả lời lúc {}", crate::ui::clock());
+                }
+                GuiEvent::ReactionsReceived(events) => {
+                    if crate::reaction::apply_to_threads(&mut self.threads, &events) {
+                        self.persist_threads_async();
+                    }
                 }
                 GuiEvent::Reacted { reaction, .. } => {
                     // The bubble was already updated locally (`reaction::set_mine`); the server's

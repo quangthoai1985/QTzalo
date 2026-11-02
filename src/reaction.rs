@@ -206,6 +206,22 @@ pub fn apply(reactions: &mut Vec<MsgReaction>, ev: &ReactionEvent) -> bool {
     }
 }
 
+/// Apply events to the messages held in memory (the newest messages of each conversation).
+/// Events for a conversation or message that is not loaded are dropped. Returns `true` if any
+/// message changed.
+pub fn apply_to_threads(threads: &mut [crate::chat::Thread], events: &[ReactionEvent]) -> bool {
+    let mut changed = false;
+    for ev in events {
+        let Some(t) = threads.iter_mut().find(|t| t.id == ev.thread_id) else {
+            continue;
+        };
+        if let Some(m) = t.messages.iter_mut().find(|m| m.id == ev.msg_id) {
+            changed |= apply(&mut m.reactions, ev);
+        }
+    }
+    changed
+}
+
 /// This account's reaction set from QTzalo (`""` = removed). `ts = 0` so the server's own event
 /// for it, which carries the real time, always wins.
 pub fn set_mine(reactions: &mut Vec<MsgReaction>, emoji: &str) {
@@ -416,6 +432,33 @@ mod tests {
         let new_form = vec![MsgReaction { uid: "0".into(), emoji: "😆".into(), ts: 3 }];
         let text = serde_json::to_string(&new_form).unwrap();
         assert_eq!(serde_json::from_str::<Vec<MsgReaction>>(&text).unwrap(), new_form);
+    }
+
+    fn thread_with(id: &str, msg_id: &str) -> crate::chat::Thread {
+        crate::chat::Thread {
+            id: id.into(),
+            name: String::new(),
+            preview: String::new(),
+            time: String::new(),
+            avatar: None,
+            is_group: false,
+            messages: vec![crate::chat::ChatMessage { id: msg_id.into(), ..Default::default() }],
+        }
+    }
+
+    #[test]
+    fn apply_to_threads_updates_matching_message() {
+        let mut threads = vec![thread_with("222", "7001")];
+        assert!(apply_to_threads(&mut threads, &[ev("222", false, "7001", "222", "❤️", 5)]));
+        assert_eq!(threads[0].messages[0].reactions.len(), 1);
+    }
+
+    #[test]
+    fn apply_to_threads_ignores_unknown_thread_or_message() {
+        let mut threads = vec![thread_with("222", "7001")];
+        let events = [ev("999", false, "7001", "222", "❤️", 5), ev("222", false, "1", "222", "❤️", 5)];
+        assert!(!apply_to_threads(&mut threads, &events));
+        assert!(threads[0].messages[0].reactions.is_empty());
     }
 
     #[test]

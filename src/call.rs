@@ -949,8 +949,21 @@ pub fn extract_voip_controls(data_node: &Value) -> Vec<Value> {
     voip_events
 }
 
+/// One `lp_control` reply: its VoIP control events and the whole `data` node (which also
+/// carries `reacts` / `reactGroups`, `re-notes/10` §17).
+pub struct CtrlPoll {
+    pub voip: Vec<Value>,
+    pub data: Value,
+}
+
 /// Poll `lp_control` (`getControllFromPolling`, cmd `99101`) once and return any incoming VoIP control events.
 pub async fn poll_voip_controls(s: &Session, state: &mut CtrlPollState) -> Result<Vec<Value>> {
+    poll_controls(s, state).await.map(|p| p.voip)
+}
+
+/// Poll `lp_control` once. The first poll with cursor `"1"` replays history: its VoIP events are
+/// dropped, but `data` is still returned (reactions since login are worth applying).
+pub async fn poll_controls(s: &Session, state: &mut CtrlPollState) -> Result<CtrlPoll> {
     if s.login.is_none() {
         bail!("chưa đăng nhập");
     }
@@ -989,7 +1002,7 @@ pub async fn poll_voip_controls(s: &Session, state: &mut CtrlPollState) -> Resul
     if is_initial_cursor {
         // First poll with cursor "1" only syncs `lastActionId` to the server's latest cursor;
         // discard historical replay events from previous sessions.
-        return Ok(Vec::new());
+        return Ok(CtrlPoll { voip: Vec::new(), data: data_node.clone() });
     }
     let events = extract_voip_controls(data_node);
     if !events.is_empty() {
@@ -1003,7 +1016,7 @@ pub async fn poll_voip_controls(s: &Session, state: &mut CtrlPollState) -> Resul
             ),
         );
     }
-    Ok(events)
+    Ok(CtrlPoll { voip: events, data: data_node.clone() })
 }
 
 // ---------------------------------------------------------------------------

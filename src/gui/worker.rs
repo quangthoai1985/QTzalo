@@ -400,6 +400,19 @@ fn send_new_gaps(gui_tx: &Sender<GuiEvent>, ctx: &egui::Context) {
     }
 }
 
+/// Forward the reaction changes in a socket / `lp_control` payload to the GUI.
+fn send_reactions(payload: &serde_json::Value, s: &Session, gui_tx: &Sender<GuiEvent>, ctx: &egui::Context) {
+    let Some(li) = s.login.as_ref() else {
+        return;
+    };
+    let cloud = Some(li.send2me_id.as_str()).filter(|c| !c.is_empty());
+    let events = crate::reaction::extract_events(payload, &li.uin, cloud);
+    if !events.is_empty() {
+        let _ = gui_tx.send(GuiEvent::ReactionsReceived(events));
+        ctx.request_repaint();
+    }
+}
+
 /// Recompute conversation order (`get-last-msgs` activity + msgId clock) for the GUI.
 fn send_conversation_activity(gui_tx: &Sender<GuiEvent>, ctx: &egui::Context) {
     if let Ok(store) = crate::store::MessageStore::open(crate::paths::history_db()) {
@@ -562,6 +575,19 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                             {
                                                 cb.handle_control_event(voip_ev);
                                             }
+                                            if matches!(
+                                                ev.cmd,
+                                                crate::socket::CMD_PUSH_REACTION
+                                                    | crate::socket::CMD_PULL_REACT_1_1
+                                                    | crate::socket::CMD_PULL_REACT_GROUP
+                                            ) {
+                                                send_reactions(
+                                                    &ev.payload,
+                                                    &s_snap,
+                                                    &gui_tx_ws,
+                                                    &ctx_ws,
+                                                );
+                                            }
                                             if ev.is_chat_ish()
                                                 && crate::sync_state::record_gaps_from(&ev.payload)
                                             {
@@ -620,23 +646,26 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                     });
                 }
 
-                // 2) Background HTTP long-poll fallback for VoIP control events (`lp_control`)
+                // 2) Background HTTP long-poll for VoIP control events and reactions (`lp_control`)
                 {
                     let s_ctrl = session.clone();
                     let cps = ctrl_poll_state.clone();
                     let cb = call_bridge.clone();
+                    let gui_tx_ctrl = gui_tx.clone();
+                    let ctx_ctrl = egui_ctx.clone();
                     tokio::spawn(async move {
                         loop {
                             let s_snap = s_ctrl.lock().await.clone();
                             if s_snap.login.is_some() {
-                                let voip_res = {
+                                let ctrl_res = {
                                     let mut st = cps.lock().await;
-                                    crate::call::poll_voip_controls(&s_snap, &mut st).await
+                                    crate::call::poll_controls(&s_snap, &mut st).await
                                 };
-                                if let Ok(events) = voip_res {
-                                    for ev in events {
+                                if let Ok(poll) = ctrl_res {
+                                    for ev in poll.voip {
                                         cb.handle_control_event(ev);
                                     }
+                                    send_reactions(&poll.data, &s_snap, &gui_tx_ctrl, &ctx_ctrl);
                                 } else {
                                     tokio::time::sleep(Duration::from_secs(5)).await;
                                 }
