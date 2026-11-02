@@ -17,6 +17,7 @@ mod media;
 mod param_cipher;
 mod paths;
 mod qr;
+mod reaction;
 mod session;
 mod socket;
 mod store;

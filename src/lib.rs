@@ -11,6 +11,7 @@ pub mod media;
 pub mod param_cipher;
 pub mod paths;
 pub mod qr;
+pub mod reaction;
 pub mod session;
 pub mod socket;
 pub mod store;
