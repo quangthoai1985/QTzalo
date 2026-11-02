@@ -1501,6 +1501,7 @@ pub(super) fn render_chat_bubble(
     // Rows stored before media parsing (text = Zalo CDN URL) render as the photo / video they are.
     let legacy_view = legacy_media_view(msg);
     let msg = legacy_view.as_ref().unwrap_or(msg);
+    let has_reactions = crate::reaction::summary(&msg.reactions).total > 0;
     let avail_w = ui.available_width();
     let max_bubble_width = (avail_w * 0.72).clamp(140.0, 520.0);
     let max_text_width = (max_bubble_width - 24.0).max(90.0);
@@ -1520,7 +1521,7 @@ pub(super) fn render_chat_bubble(
         && (!next_same_sender
             || is_latest_outgoing
             || has_interactive_card
-            || !msg.reactions.is_empty()
+            || has_reactions
             || msg.is_pinned
             || msg.is_starred);
 
@@ -1714,7 +1715,7 @@ pub(super) fn render_chat_bubble(
         };
         // The group sender label is drawn above the bubble, so it never widens it.
         let sender_w = 0.0_f32;
-        let marks_w = if !msg.reactions.is_empty() || msg.is_pinned || msg.is_starred {
+        let marks_w = if has_reactions || msg.is_pinned || msg.is_starred {
             78.0_f32
         } else {
             0.0_f32
@@ -1770,7 +1771,7 @@ pub(super) fn render_chat_bubble(
         left: h_margin,
         right: h_margin,
         top: v_margin,
-        bottom: v_margin + if msg.reactions.is_empty() || frameless { 0.0 } else { 7.0 },
+        bottom: v_margin + if !has_reactions || frameless { 0.0 } else { 7.0 },
     };
     let (fill, stroke) = if frameless {
         (Color32::TRANSPARENT, Stroke::NONE)
@@ -2003,18 +2004,19 @@ fn paint_reaction_chip(
     pal: &ThemePalette,
     emoji_textures: &HashMap<String, TextureHandle>,
 ) -> bool {
-    if msg.reactions.is_empty() {
+    let summary = crate::reaction::summary(&msg.reactions);
+    if summary.total == 0 {
         return false;
     }
     let mut unique: Vec<&str> = Vec::new();
-    for r in &msg.reactions {
-        let key = emoji_to_tex_key(r);
+    for (emoji, _) in &summary.emojis {
+        let key = emoji_to_tex_key(emoji);
         if !unique.contains(&key) {
             unique.push(key);
         }
     }
     unique.truncate(3);
-    let total = msg.reactions.len();
+    let total = summary.total;
     let count_txt = if total > 1 { total.to_string() } else { String::new() };
     let icon = 15.0_f32;
     let text_w = if count_txt.is_empty() {
@@ -2066,6 +2068,8 @@ fn paint_reaction_chip(
             pal.text_secondary,
         );
     }
+    ui.interact(chip, Id::new(("react_chip", &msg.id, msg.ts)), Sense::hover())
+        .on_hover_text(crate::reaction::summary_tooltip(&summary));
     true
 }
 
@@ -3010,10 +3014,9 @@ pub(super) fn render_reactions(
     let has_pin = msg.is_pinned;
     let has_star = msg.is_starred;
     // Reactions are painted as a chip overlapping the bubble edge (`paint_reaction_chip`).
-    let has_react = false;
     let _ = emoji_textures;
 
-    if !has_pin && !has_star && !has_react {
+    if !has_pin && !has_star {
         return;
     }
 
@@ -3050,27 +3053,6 @@ pub(super) fn render_reactions(
                             .color(Color32::from_rgb(234, 179, 8))
                             .strong(),
                     );
-                });
-        }
-
-        if has_react {
-            egui::Frame::none()
-                .fill(pal.bg_elevated)
-                .stroke(Stroke::new(1.0_f32, pal.border))
-                .rounding(Rounding::same(12.0))
-                .inner_margin(Margin::symmetric(6.0, 2.0))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(3.0, 0.0);
-                        for r in &msg.reactions {
-                            let key = emoji_to_tex_key(r);
-                            if let Some(tex) = emoji_textures.get(key) {
-                                ui.add(egui::Image::new(tex).fit_to_exact_size(Vec2::splat(18.0)));
-                            } else {
-                                ui.label(RichText::new(r).size(13.0));
-                            }
-                        }
-                    });
                 });
         }
     });

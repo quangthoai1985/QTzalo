@@ -857,9 +857,7 @@ impl<'a> TuiApp<'a> {
             .and_then(|t| t.messages.get_mut(mi))
         {
             let code = chat::reaction_code_and_type(emoji).0;
-            if !m.reactions.iter().any(|r| r == code) {
-                m.reactions.push(code.to_string());
-            }
+            crate::reaction::set_mine(&mut m.reactions, chat::icon_to_emoji(code));
         }
         let session = self.session_clone();
         let tx = self.bg_tx.clone();
@@ -1411,9 +1409,7 @@ impl<'a> TuiApp<'a> {
                         .and_then(|t| t.messages.iter_mut().find(|m| m.id == msg_id))
                     {
                         let code = chat::reaction_code_and_type(&icon).0;
-                        if !m.reactions.iter().any(|r| r == code) {
-                            m.reactions.push(code.to_string());
-                        }
+                        crate::reaction::set_mine(&mut m.reactions, chat::icon_to_emoji(code));
                     }
                     self.status = "Da tha cam xuc".into();
                 }
@@ -1998,8 +1994,9 @@ fn build_chat_lines(
                 body.push_str(url);
             }
         }
-        if !m.reactions.is_empty() {
-            let icons: Vec<&str> = m.reactions.iter().map(|r| chat::icon_to_emoji(r)).collect();
+        let reactions = crate::reaction::summary(&m.reactions);
+        if reactions.total > 0 {
+            let icons: Vec<&str> = reactions.emojis.iter().map(|(e, _)| e.as_str()).collect();
             body.push_str("  ");
             body.push_str(&icons.join(" "));
         }
@@ -2605,7 +2602,11 @@ mod tests {
                     ts: 1_700_000_060_000,
                     reply_to_sender: Some("An".into()),
                     reply_to_text: Some("xin chao".into()),
-                    reactions: vec!["/-strong".into()],
+                    reactions: vec![crate::reaction::MsgReaction {
+                        uid: "0".into(),
+                        emoji: "👍".into(),
+                        ts: 0,
+                    }],
                     ..Default::default()
                 },
             ],

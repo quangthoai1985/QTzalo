@@ -1196,21 +1196,14 @@ impl ZaloGuiApp {
                     }
                     self.status_msg = format!("Đã gửi trả lời lúc {}", crate::ui::clock());
                 }
-                GuiEvent::Reacted {
-                    thread_id,
-                    msg_id,
-                    ts,
-                    reaction,
-                } => {
-                    if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
-                        if let Some(m) = t.messages.iter_mut().find(|m| {
-                            (!m.id.is_empty() && m.id == msg_id) || (m.id.is_empty() && m.ts == ts)
-                        }) {
-                            m.reactions = vec![reaction];
-                        }
-                        self.persist_threads_async();
-                    }
-                    self.status_msg = "Đã thả cảm xúc".into();
+                GuiEvent::Reacted { reaction, .. } => {
+                    // The bubble was already updated locally (`reaction::set_mine`); the server's
+                    // own event settles it with the real time.
+                    self.status_msg = if reaction.is_empty() {
+                        "Đã gỡ cảm xúc".into()
+                    } else {
+                        "Đã thả cảm xúc".into()
+                    };
                 }
                 GuiEvent::MessageDeleted {
                     thread_id,

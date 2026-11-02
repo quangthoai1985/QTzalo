@@ -28,7 +28,7 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_text: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reactions: Vec<String>,
+    pub reactions: Vec<crate::reaction::MsgReaction>,
     #[serde(default)]
     pub is_pinned: bool,
     #[serde(default)]
@@ -2379,6 +2379,8 @@ pub fn icon_to_emoji(icon: &str) -> &'static str {
 /// Map a visual reaction emoji or Zalo reaction code to `(rIcon, rType)` (`compact-app-pc.js:10848900`).
 pub fn reaction_code_and_type(emoji_or_code: &str) -> (&'static str, i32) {
     match emoji_or_code {
+        // Removal: [I] zca-js `Reactions.NONE` (`re-notes/10` §17).
+        "" => ("", -1),
         "👍" | "/-strong" => ("/-strong", 3),
         "❤️" | "❤" | "/-heart" => ("/-heart", 5),
         "😆" | ":>" => (":>", 0),
@@ -4233,15 +4235,21 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     })
 }
 
-fn extract_reactions(it: &Value) -> Vec<String> {
-    let mut res = Vec::new();
+/// Reactions embedded in a history item. They carry no reactor, so they are stored like
+/// pre-v0.1.3 rows (`uid` empty); live events (`crate::reaction`) are per person.
+fn extract_reactions(it: &Value) -> Vec<crate::reaction::MsgReaction> {
+    let mut res: Vec<crate::reaction::MsgReaction> = Vec::new();
     if let Some(r) = it.get("reacts").or_else(|| it.get("reactions")) {
         if let Some(arr) = r.get("reactions").and_then(Value::as_array) {
             for item in arr {
                 if let Some(icon) = item.get("rIcon").and_then(Value::as_str) {
                     let em = icon_to_emoji(icon);
-                    if !res.contains(&em.to_string()) {
-                        res.push(em.to_string());
+                    if !res.iter().any(|r| r.emoji == em) {
+                        res.push(crate::reaction::MsgReaction {
+                            uid: String::new(),
+                            emoji: em.to_string(),
+                            ts: 0,
+                        });
                     }
                 }
             }
@@ -4477,7 +4485,8 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                             existing.text = parsed.text;
                         }
                     }
-                    if !parsed.reactions.is_empty() {
+                    // History reactions have no reactor: never let them replace per-person ones.
+                    if existing.reactions.is_empty() && !parsed.reactions.is_empty() {
                         existing.reactions = parsed.reactions;
                     }
                     existing.is_pinned = existing.is_pinned || parsed.is_pinned;
@@ -4877,6 +4886,11 @@ pub async fn find_user_by_phone(s: &Session, raw_phone: &str) -> Result<PhoneLoo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reaction_code_for_removal() {
+        assert_eq!(reaction_code_and_type(""), ("", -1));
+    }
 
     #[test]
     fn friend_host_is_tried_before_profile() {

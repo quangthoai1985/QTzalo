@@ -443,11 +443,9 @@ impl MessageStore {
                             .get("reply_to_text")
                             .and_then(|v| v.as_str())
                             .map(str::to_string);
-                        if let Some(arr) = val.get("reactions").and_then(|v| v.as_array()) {
-                            reactions = arr
-                                .iter()
-                                .filter_map(|v| v.as_str().map(str::to_string))
-                                .collect();
+                        // Objects since v0.1.3, bare emoji strings before (`MsgReaction` reads both).
+                        if let Some(arr) = val.get("reactions").filter(|v| v.is_array()) {
+                            reactions = serde_json::from_value(arr.clone()).unwrap_or_default();
                         }
                         is_pinned = val
                             .get("is_pinned")
@@ -792,6 +790,66 @@ mod tests {
         assert_eq!(msgs[1].msg_id, "m1");
         assert_eq!(msgs[2].ts, 300);
         assert_eq!(msgs[2].msg_id, "m3");
+    }
+
+    #[test]
+    fn reactions_roundtrip_through_raw_json() {
+        use crate::reaction::MsgReaction;
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let reactions = vec![
+            MsgReaction { uid: "0".into(), emoji: "😆".into(), ts: 0 },
+            MsgReaction { uid: "222".into(), emoji: "❤️".into(), ts: 9 },
+        ];
+        let thread = Thread {
+            id: "t_r".into(),
+            name: "Reactions".into(),
+            preview: String::new(),
+            time: String::new(),
+            avatar: None,
+            is_group: false,
+            messages: vec![ChatMessage {
+                id: "7001".into(),
+                sender: "Alice".into(),
+                text: "Hello".into(),
+                ts: 1000,
+                reactions: reactions.clone(),
+                ..Default::default()
+            }],
+        };
+        persist_threads(&mut store, &[thread]).unwrap();
+        // A row written before v0.1.3 stored bare emoji strings.
+        store
+            .upsert_thread(&StoredThread {
+                thread_id: "t_old".into(),
+                name: "Old".into(),
+                is_group: false,
+                last_ts: 2000,
+            })
+            .unwrap();
+        store
+            .upsert_message(&StoredMessage {
+                msg_id: "7002".into(),
+                thread_id: "t_old".into(),
+                sender_id: "u_1".into(),
+                sender_name: "Bob".into(),
+                text: "Hi".into(),
+                msg_type: "chat.text".into(),
+                ts: 2000,
+                is_outgoing: false,
+                raw_json: r#"{"reactions":["❤️"]}"#.into(),
+            })
+            .unwrap();
+
+        let mut hydrated: Vec<Thread> = Vec::new();
+        store.hydrate_threads(&mut hydrated, 50).unwrap();
+        let find = |tid: &str| {
+            hydrated.iter().find(|t| t.id == tid).unwrap().messages[0].reactions.clone()
+        };
+        assert_eq!(find("t_r"), reactions);
+        assert_eq!(
+            find("t_old"),
+            vec![MsgReaction { uid: String::new(), emoji: "❤️".into(), ts: 0 }]
+        );
     }
 
     #[test]

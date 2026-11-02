@@ -1444,19 +1444,18 @@ impl ZaloGuiApp {
                                     self.forward_msg = Some(m);
                                     self.forward_filter.clear();
                                 }
+                                // Same as my current reaction: nothing to send.
+                                BubbleAction::React(r)
+                                    if crate::reaction::summary(&m.reactions).mine.as_deref()
+                                        == Some(r) => {}
                                 BubbleAction::React(r) => {
                                     if let Some(real) = self
                                         .threads
                                         .get_mut(self.selected_thread_index)
                                         .and_then(|t| t.messages.get_mut(idx))
                                     {
-                                        if real.reactions.contains(&r.to_string()) {
-                                            real.reactions.clear();
-                                            self.status_msg = "Đã bỏ cảm xúc".into();
-                                        } else {
-                                            real.reactions = vec![r.to_string()];
-                                            self.status_msg = format!("Đã thả cảm xúc {r}");
-                                        }
+                                        crate::reaction::set_mine(&mut real.reactions, r);
+                                        self.status_msg = format!("Đã thả cảm xúc {r}");
                                     }
                                     self.persist_threads_async();
                                     if let Some(tx) = WORKER_TX.get() {
