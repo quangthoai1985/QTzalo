@@ -180,6 +180,37 @@ Người dùng nhận nhiều tin 1-1 và tin nhóm suốt ngày 02/11 trong lú
 - `getmg-v2` được gửi kèm `gridVerMap` lấy nguyên từ `getlg/v4` (phiên bản hiện tại của từng nhóm). Máy chủ trả `gridInfoMap: {}` và `unchangedsGroup: [61 nhóm]`: nó chỉ gửi thông tin cho nhóm có phiên bản khác với phiên bản client gửi. Gửi phiên bản `0` thì máy chủ trả tên và ảnh của cả 61 nhóm (50 + 11).
 - 6 nhóm có tên thật bắt đầu bằng "Nhóm ". `is_generic_thread_name` coi mọi tên bắt đầu bằng "Nhóm " là tên tạm, nên bản ghi tạm "Nhóm <id>" do tin đến tạo ra đã ghi đè tên thật. Đã sửa (`58ea93f`). Kiểm chứng: 61/61 nhóm có tên đúng.
 
+## Tối 02/11 — reaction (thả cảm xúc), 20:57–21:00
+
+Mục đích: chốt cấu trúc sự kiện reaction trước khi làm v0.1.3 (thả cảm xúc khi rê chuột, nhận reaction theo thời gian thực). Bản `1dd4ee6`, `ZCALL_WS_TRACE=1`, phiên đã lưu. Lượt a: 20:57:23–20:58:39, không có reaction nào. Lượt b: 20:59:42–21:00:35. Giữa hai lượt (QTzalo tắt), người dùng thả cảm xúc trên điện thoại; trong lượt b, thả thêm một lần.
+
+### 17. Reaction đến qua `612`, `610_1` và `lp_control` [O]
+
+```
+612_0 (đẩy trực tiếp lúc đang mở) và phản hồi kéo 610_1 / 611_1:
+data: {
+  reacts:      [ … ]     // 1-1
+  reactGroups: [ … ]     // nhóm
+  controls: [], more, lastActionId,
+  queueStatus: { 610_0: {ids, lastId}, 610_1: {ids, lastId} }   // 612 kèm luôn con trỏ của 610_x
+}
+mỗi phần tử:
+{ actionId: str(13), msgId: str(13), cliMsgId: str(13), msgType: "chat.reaction",
+  uidFrom: str,          // "0" = chính chủ tài khoản (thả từ thiết bị khác); nhóm: uid thành viên str(19)
+  idTo:    str,          // 1-1: người kia (str(18)/str(19)); nhóm: id nhóm str(19)
+  dName:   null,         // chỉ thấy ở lp_control
+  ts, ttl: num,
+  content: "<JSON>" → { rIcon: str, rType: num, source: num, msgSender: str(9),
+                        rMsg: [ { gMsgID: num, cMsgID: num, msgType: num } ] } }
+```
+
+- **Lúc đang mở:** một frame `612_0` lúc 20:59:53, `reacts: 1×`, `uidFrom = "0"`, `rIcon` dài 7 ký tự (trong bảng mã, chỉ `/-heart` dài 7).
+- **Lúc tắt:** kéo `610_1` từ con trỏ đã lưu trả **2 reaction** thả trong lúc tắt (`ts` ≈ 20:59:35–39), `uidFrom = "0"`, `rIcon` dài 2 ký tự (`:>` hoặc `:o`). `611_1` rỗng ở cả hai lượt.
+- **`lp_control` (HTTP):** lần kéo đầu (`lastActionId = 1`) trả **48 `reacts` + 50 `reactGroups`** từ lúc đăng nhập; lần sau trả thêm 10 `reactGroups`, rồi lặp lại đúng reaction của `612`. Queue `18` của long-poll khớp `610_1` (`queue_ctrl_actionid_map`).
+- Trong `rMsg`, `gMsgID` và `cMsgID` là **số**, không phải chuỗi. Có phần tử nhóm mang 2 mục `rMsg`, `msgType = 32`.
+- `get-last-msgs` có thêm `clearUnreadsReact` (43 hội thoại, cùng dạng `clearUnreads`).
+- **Chưa thấy:** đổi cảm xúc, gỡ cảm xúc, và reaction do QTzalo gửi đi (trong lượt b không có lệnh `POST …/reaction`). Ý nghĩa của `msgSender` **[U]**. Theo thư viện mã nguồn mở zca-js, gỡ cảm xúc là `rIcon = ""` kèm `rType = -1` **[I]**.
+
 ## Kết luận theo giả thiết
 
 | Giả thiết (nguồn) | Kết luận |
@@ -196,3 +227,4 @@ Người dùng nhận nhiều tin 1-1 và tin nhóm suốt ngày 02/11 trong lú
 | Tin E2EE đến qua `513/713` | **Bác bỏ** queue: phiên này dùng `515/517`. Có tin E2EE thật hay không: chưa rõ |
 | PC nhận `temp_key` sau đăng nhập QR (Phần B) | **Xác nhận**: `transfer_after_login` / `transfer_sync2` trong `603_1` |
 | Kéo với `lastId` đã lưu chỉ trả phần mới (A1) | **Xác nhận**: không có tin mới → 0 tin (lượt 5); có 3 tin mới → đúng 3 tin (A7) |
+| Reaction đến qua socket `612` lúc mở app và qua `610_1/611_1` lúc tắt (v0.1.3) | **Xác nhận** `612` và `610_1` (§17); `611_1` chưa có dữ liệu. `lp_control` cũng trả reaction từ lúc đăng nhập |
