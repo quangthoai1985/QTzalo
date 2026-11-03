@@ -43,16 +43,21 @@ impl ZaloGuiApp {
                                 .color(pal.text_primary)
                                 .strong(),
                         );
-                        ui.horizontal(|ui| {
-                            let (dr, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                            ui.painter()
-                                .circle_filled(dr.center(), 3.8, pal.accent_online);
-                            ui.label(
-                                RichText::new("Đang hoạt động")
-                                    .size(11.5)
-                                    .color(pal.text_secondary),
-                            );
-                        });
+                        // Only show a presence dot when the user allows showing online status;
+                        // QTzalo has no real presence feed, so an unconditional green dot lied.
+                        if self.settings.show_online_status {
+                            ui.horizontal(|ui| {
+                                let (dr, _) =
+                                    ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                ui.painter()
+                                    .circle_filled(dr.center(), 3.8, pal.accent_online);
+                                ui.label(
+                                    RichText::new("Đang hoạt động")
+                                        .size(11.5)
+                                        .color(pal.text_secondary),
+                                );
+                            });
+                        }
                         if !self.user_uin.is_empty() {
                             ui.label(
                                 RichText::new(format!("UIN: {}", self.user_uin))

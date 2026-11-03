@@ -1500,6 +1500,8 @@ pub(super) fn render_chat_bubble(
     loading_stickers: &mut HashSet<String>,
     emoji_textures: &HashMap<String, TextureHandle>,
     downloads: &HashMap<String, DownloadState>,
+    // Settings → Tin nhắn: double-clicking a bubble starts a reply.
+    double_click_to_reply: bool,
     idx: usize,
 ) -> Option<BubbleAction> {
     // Rows stored before media parsing (text = Zalo CDN URL) render as the photo / video they are.
@@ -1825,7 +1827,6 @@ pub(super) fn render_chat_bubble(
                         content_width,
                         call_card_opt.as_ref(),
                         show_timestamp && !frameless,
-                        is_latest_outgoing,
                         sticker_textures,
                         loading_stickers,
                         emoji_textures,
@@ -1840,7 +1841,7 @@ pub(super) fn render_chat_bubble(
         }
         let react_action =
             hover_reaction_controls(ui, bubble_resp.rect, msg, true, pal, emoji_textures);
-        if bubble_resp.double_clicked() {
+        if double_click_to_reply && bubble_resp.double_clicked() {
             return Some(BubbleAction::Reply);
         }
         card_action.or(react_action).or_else(|| {
@@ -1904,7 +1905,6 @@ pub(super) fn render_chat_bubble(
                             content_width,
                             call_card_opt.as_ref(),
                             show_timestamp && !frameless,
-                            false,
                             sticker_textures,
                             loading_stickers,
                             emoji_textures,
@@ -1921,7 +1921,7 @@ pub(super) fn render_chat_bubble(
         }
         let react_action =
             hover_reaction_controls(ui, bubble_resp.rect, msg, false, pal, emoji_textures);
-        if bubble_resp.double_clicked() {
+        if double_click_to_reply && bubble_resp.double_clicked() {
             return Some(BubbleAction::Reply);
         }
         card_action.or(react_action).or_else(|| {
@@ -1949,7 +1949,6 @@ fn bubble_contents(
     content_width: f32,
     call_card: Option<&CallCardView>,
     show_timestamp: bool,
-    is_latest_outgoing: bool,
     sticker_textures: &HashMap<String, TextureHandle>,
     loading_stickers: &mut HashSet<String>,
     emoji_textures: &HashMap<String, TextureHandle>,
@@ -1978,13 +1977,9 @@ fn bubble_contents(
         render_reactions(ui, msg, pal, emoji_textures);
         if show_timestamp {
             ui.add_space(3.0);
+            // No delivery/read receipt data exists, so the bubble shows the send time only.
             let (txt, col) = if outgoing {
-                let t = if is_latest_outgoing {
-                    format!("{} · Đã nhận", msg.time)
-                } else {
-                    msg.time.clone()
-                };
-                (t, pal.bubble_out_meta)
+                (msg.time.clone(), pal.bubble_out_meta)
             } else {
                 (msg.time.clone(), pal.bubble_in_meta)
             };

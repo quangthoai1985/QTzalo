@@ -55,7 +55,16 @@ impl ZaloGuiApp {
 
         if show_info_drawer {
             if let Some((ref d_id, ref d_name, ref d_ava, d_is_group, d_msg_count)) = thread_meta {
-                let shared_photos: Vec<(String, String, String, String)> = self
+                // Real member count: the per-thread map (demo/known counts) first, then the group
+                // list returned by `getmg-v2` (`chat::group_member_count`). `None` hides the line.
+                let d_member_count = self
+                    .group_member_counts
+                    .get(d_id)
+                    .copied()
+                    .or_else(|| crate::chat::group_member_count(d_id).map(|n| n as usize));
+                // Shared media: photos **and** videos with a thumbnail, newest first (max 9, the
+                // drawer has no "see all" screen yet).
+                let shared_media: Vec<(String, String, String, String, bool)> = self
                     .threads
                     .get(self.selected_thread_index)
                     .map(|t| {
@@ -69,24 +78,36 @@ impl ZaloGuiApp {
                                 let is_photo = m.link_src.as_deref() == Some("Hình ảnh Zalo")
                                     || m.text.trim() == "[Hình ảnh]"
                                     || m.text.trim().starts_with("[Hình ảnh] ");
-                                if !is_photo {
-                                    return None;
+                                if is_photo {
+                                    let thumb = m
+                                        .link_thumb
+                                        .as_deref()
+                                        .or(m.link_url.as_deref())
+                                        .filter(|u| !u.is_empty())?;
+                                    let full = m.link_url.as_deref().unwrap_or(thumb).to_string();
+                                    let title = m
+                                        .link_title
+                                        .clone()
+                                        .unwrap_or_else(|| "Hình ảnh đã chia sẻ".into());
+                                    return Some((
+                                        format!("thumb_{}", crate::crypto::md5_hex(thumb)),
+                                        thumb.to_string(),
+                                        full,
+                                        title,
+                                        false,
+                                    ));
                                 }
-                                let thumb = m
-                                    .link_thumb
-                                    .as_deref()
-                                    .or(m.link_url.as_deref())
-                                    .filter(|u| !u.is_empty())?;
-                                let full = m.link_url.as_deref().unwrap_or(thumb).to_string();
-                                let title = m
-                                    .link_title
-                                    .clone()
-                                    .unwrap_or_else(|| "Hình ảnh đã chia sẻ".into());
+                                // Video with a thumbnail: the grid used to advertise "Ảnh / Video"
+                                // but only ever listed photos. Both the poster and the playable
+                                // URL are required, otherwise the tile would open a still image.
+                                let thumb = video_thumb_url(m)?;
+                                let full = video_play_url(m)?.to_string();
                                 Some((
                                     format!("thumb_{}", crate::crypto::md5_hex(thumb)),
                                     thumb.to_string(),
                                     full,
-                                    title,
+                                    video_title(m),
+                                    true,
                                 ))
                             })
                             .take(9)
@@ -141,31 +162,51 @@ impl ZaloGuiApp {
                                             .unwrap_or(crate::chat::FriendshipStatus::Unknown)
                                     };
                                     let (sub_txt, sub_col) = if d_is_group {
-                                        ("Nhóm đang hoạt động", pal.accent_online)
+                                        // A group has no "online" presence to report: show its real
+                                        // member count when known, otherwise no status line at all.
+                                        match d_member_count {
+                                            Some(n) => (format!("{n} thành viên"), pal.text_muted),
+                                            None => (String::new(), pal.text_muted),
+                                        }
                                     } else if d_is_cloud {
-                                        ("Lưu trữ đám mây cá nhân", pal.primary_hover)
+                                        ("Lưu trữ đám mây cá nhân".to_string(), pal.primary_hover)
                                     } else {
+                                        // Presence is a claim: only show it while the user keeps
+                                        // online-status display enabled.
+                                        let online = self.settings.show_online_status;
                                         match d_fr_status {
                                             crate::chat::FriendshipStatus::Friend => {
-                                                ("✓ Đã kết bạn · Trực tuyến", pal.accent_online)
+                                                if online {
+                                                    (
+                                                        "✓ Đã kết bạn · Trực tuyến".to_string(),
+                                                        pal.accent_online,
+                                                    )
+                                                } else {
+                                                    (
+                                                        "✓ Đã kết bạn".to_string(),
+                                                        pal.accent_online,
+                                                    )
+                                                }
                                             }
                                             crate::chat::FriendshipStatus::IncomingPending => (
-                                                "📩 Đã gửi lời mời kết bạn cho bạn",
+                                                "📩 Đã gửi lời mời kết bạn cho bạn".to_string(),
                                                 pal.primary_hover,
                                             ),
                                             crate::chat::FriendshipStatus::OutgoingPending => {
-                                                ("⏳ Đã gửi lời mời kết bạn", pal.warning)
+                                                ("⏳ Đã gửi lời mời kết bạn".to_string(), pal.warning)
                                             }
                                             crate::chat::FriendshipStatus::Stranger => (
-                                                "Người lạ · Chưa kết bạn",
+                                                "Người lạ · Chưa kết bạn".to_string(),
                                                 Color32::from_rgb(249, 115, 22),
                                             ),
                                             crate::chat::FriendshipStatus::Unknown => {
-                                                ("Đang kiểm tra kết bạn…", pal.text_muted)
+                                                ("Đang kiểm tra kết bạn…".to_string(), pal.text_muted)
                                             }
                                         }
                                     };
-                                    ui.label(RichText::new(sub_txt).size(12.0).color(sub_col));
+                                    if !sub_txt.is_empty() {
+                                        ui.label(RichText::new(sub_txt).size(12.0).color(sub_col));
+                                    }
 
                                     ui.add_space(14.0);
                                     // Quick Action Buttons (Sync & Pin/Star Filter)
@@ -245,7 +286,7 @@ impl ZaloGuiApp {
                                     );
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                         ui.label(
-                                            RichText::new(format!("({})", shared_photos.len()))
+                                            RichText::new(format!("({})", shared_media.len()))
                                                 .size(11.5)
                                                 .color(pal.primary_hover),
                                         );
@@ -253,7 +294,7 @@ impl ZaloGuiApp {
                                 });
                                 ui.add_space(8.0);
 
-                                if shared_photos.is_empty() {
+                                if shared_media.is_empty() {
                                     ui.label(
                                         RichText::new("Chưa có ảnh hoặc video chia sẻ.")
                                             .size(11.5)
@@ -262,7 +303,9 @@ impl ZaloGuiApp {
                                 } else {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                                        for (tkey, thumb_u, full_u, ptitle) in &shared_photos {
+                                        for (tkey, thumb_u, full_u, ptitle, is_video) in
+                                            &shared_media
+                                        {
                                             if !self.sticker_textures.contains_key(tkey)
                                                 && self.loading_stickers.insert(tkey.clone())
                                             {
@@ -292,6 +335,14 @@ impl ZaloGuiApp {
                                                     ),
                                                     Color32::WHITE,
                                                 );
+                                            } else if *is_video {
+                                                draw_lucide_icon(
+                                                    ui.painter(),
+                                                    cell_r.center(),
+                                                    lucide::FILM,
+                                                    20.0,
+                                                    pal.text_muted,
+                                                );
                                             } else {
                                                 draw_icon_image(
                                                     ui.painter(),
@@ -312,21 +363,48 @@ impl ZaloGuiApp {
                                                     },
                                                 ),
                                             );
+                                            if *is_video {
+                                                // Play badge over the thumbnail: the tile opens
+                                                // the video player, not the image viewer.
+                                                ui.painter().circle_filled(
+                                                    cell_r.center(),
+                                                    13.0,
+                                                    Color32::from_rgba_unmultiplied(15, 23, 42, 175),
+                                                );
+                                                draw_lucide_icon(
+                                                    ui.painter(),
+                                                    cell_r.center() + Vec2::new(1.0, 0.0),
+                                                    ICON_PLAY,
+                                                    14.0,
+                                                    Color32::WHITE,
+                                                );
+                                            }
                                             if cell_resp
                                                 .on_hover_cursor(CursorIcon::PointingHand)
-                                                .on_hover_text("Xem ảnh phóng to")
+                                                .on_hover_text(if *is_video {
+                                                    "Xem video"
+                                                } else {
+                                                    "Xem ảnh phóng to"
+                                                })
                                                 .clicked()
                                             {
-                                                self.image_viewer = Some(ImageViewerModal {
-                                                    tex_key: tkey.clone(),
-                                                    hd_tex_key: None,
-                                                    full_url: full_u.clone(),
-                                                    title: ptitle.clone(),
-                                                    sender: d_name.clone(),
-                                                    time: String::new(),
-                                                    zoom: 1.0,
-                                                    pan: Vec2::ZERO,
-                                                });
+                                                if *is_video {
+                                                    self.open_video(
+                                                        full_u.clone(),
+                                                        ptitle.clone(),
+                                                    );
+                                                } else {
+                                                    self.image_viewer = Some(ImageViewerModal {
+                                                        tex_key: tkey.clone(),
+                                                        hd_tex_key: None,
+                                                        full_url: full_u.clone(),
+                                                        title: ptitle.clone(),
+                                                        sender: d_name.clone(),
+                                                        time: String::new(),
+                                                        zoom: 1.0,
+                                                        pan: Vec2::ZERO,
+                                                    });
+                                                }
                                             }
                                         }
                                     });
@@ -344,7 +422,7 @@ impl ZaloGuiApp {
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(
-                                        RichText::new("Tổng số tin nhắn:")
+                                        RichText::new("Số tin đang hiển thị:")
                                             .size(11.5)
                                             .color(pal.text_muted),
                                     );
@@ -1213,7 +1291,13 @@ impl ZaloGuiApp {
                         });
                     let mut pending_action: Option<(usize, BubbleAction)> = None;
                     let mut load_older_clicked = false;
-                    let typing_name = self.typing_indicators.get(&thread_id).cloned();
+                    // Typing is opt-in (Settings → Tin nhắn) and only comes from real
+                    // `GuiEvent::Typing` events; nothing is fabricated here.
+                    let typing_name = if self.settings.show_typing_indicator {
+                        self.typing_indicators.get(&thread_id).cloned()
+                    } else {
+                        None
+                    };
                     let typing_reserve = if typing_name.is_some() { 24.0 } else { 0.0 };
                     let msg_area_height =
                         (ui.available_height() - 70.0 - picker_reserve - typing_reserve).max(100.0);
@@ -1388,6 +1472,7 @@ impl ZaloGuiApp {
                                                     &mut self.loading_stickers,
                                                     &self.emoji_textures,
                                                     &self.downloads,
+                                                    self.settings.double_click_to_reply,
                                                     idx,
                                                 ) {
                                                     pending_action = Some((idx, action));
@@ -1472,6 +1557,17 @@ impl ZaloGuiApp {
                                         .get_mut(self.selected_thread_index)
                                         .and_then(|t| t.messages.get_mut(idx))
                                     {
+                                        // `remove_mine` also drops my settled taps, so copy them
+                                        // first: `GuiEvent::ReactionFailed` restores this snapshot
+                                        // if the server rejects the removal. Self entries use the
+                                        // sentinel uid "0" (see `reaction::add_mine`), not `uin`.
+                                        let key =
+                                            format!("{}\u{1f}{}", thread_id, real.id.clone());
+                                        let snap = crate::reaction::snapshot_mine(
+                                            &real.reactions,
+                                            "0",
+                                        );
+                                        self.reaction_rollbacks.insert(key, snap);
                                         crate::reaction::remove_mine(&mut real.reactions);
                                         self.status_msg = "Đã gỡ cảm xúc".into();
                                     }

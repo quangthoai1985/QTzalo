@@ -602,29 +602,46 @@ impl ZaloGuiApp {
         resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tip)
     }
 
+    /// zCloud row footer. Real mode reports only what is actually on disk: QTzalo has no
+    /// server-side quota, so a percentage bar would need a made-up denominator.
     fn paint_storage_bar(&mut self, ui: &mut egui::Ui, pal: &ThemePalette) {
-        let (used, total, label) = if self.demo_mode {
-            let used = 1_288_490_189_u64; // 1.2 GB (sample)
-            let total = 5_368_709_120_u64; // 5 GB (sample)
-            (used, total, format!("Đã dùng {} trên {}", human_bytes(used), human_bytes(total)))
-        } else {
-            let used = self
-                .local_storage_bytes
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let total = 1_073_741_824_u64; // scale: 1 GB
-            (used, total, format!("Dữ liệu trên máy: {}", human_bytes(used)))
-        };
-        let frac = if total == 0 { 0.0 } else { (used as f64 / total as f64).clamp(0.0, 1.0) as f32 };
         let w = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::hover());
-        let bar = Rect::from_min_size(Pos2::new(rect.left() + 46.0, rect.top() + 3.0), Vec2::new((w - 66.0).max(40.0), 4.0));
-        ui.painter().rect_filled(bar, Rounding::same(2.0), pal.border);
-        let mut fill = bar;
-        fill.set_width((bar.width() * frac).max(if used > 0 { 3.0 } else { 0.0 }));
-        ui.painter().rect_filled(fill, Rounding::same(2.0), pal.primary);
+        if self.demo_mode {
+            // Sample zCloud quota, only for `--demo` screenshots.
+            let used = 1_288_490_189_u64;
+            let total = 5_368_709_120_u64;
+            let frac = (used as f64 / total as f64).clamp(0.0, 1.0) as f32;
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::hover());
+            let bar = Rect::from_min_size(
+                Pos2::new(rect.left() + 46.0, rect.top() + 3.0),
+                Vec2::new((w - 66.0).max(40.0), 4.0),
+            );
+            ui.painter().rect_filled(bar, Rounding::same(2.0), pal.border);
+            let mut fill = bar;
+            fill.set_width((bar.width() * frac).max(3.0));
+            ui.painter().rect_filled(fill, Rounding::same(2.0), pal.primary);
+            ui.painter().text(
+                Pos2::new(bar.left(), bar.bottom() + 6.0),
+                egui::Align2::LEFT_TOP,
+                format!("Đã dùng {} trên {}", human_bytes(used), human_bytes(total)),
+                FontId::proportional(11.0),
+                pal.text_muted,
+            );
+            return;
+        }
+        // Real usage, no bar: there is no real total to divide by.
+        let used = self
+            .local_storage_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let label = if used == 0 {
+            "Dữ liệu trên máy: đang tính…".to_string()
+        } else {
+            format!("Dữ liệu trên máy: {}", human_bytes(used))
+        };
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 22.0), Sense::hover());
         ui.painter().text(
-            Pos2::new(bar.left(), bar.bottom() + 6.0),
-            egui::Align2::LEFT_TOP,
+            Pos2::new(rect.left() + 46.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
             label,
             FontId::proportional(11.0),
             pal.text_muted,
