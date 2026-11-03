@@ -263,6 +263,96 @@ pub fn decrypt_with_password(password: &[u8], ciphertext: &[u8]) -> Result<Vec<u
     decrypt_cbc_blocks(&key, &[0u8; 16], ciphertext)
 }
 
+/// XZ stream magic (`FD 37 7A 58 5A 00`), as found in the addon's `.rdata`.
+pub const XZ_MAGIC: &[u8; 6] = &[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00];
+
+/// `true` when `data` starts with the XZ magic.
+pub fn looks_like_xz(data: &[u8]) -> bool {
+    data.len() >= XZ_MAGIC.len() && &data[..XZ_MAGIC.len()] == XZ_MAGIC
+}
+
+/// Decompress an XZ stream.
+///
+/// [O] The payload is a standard XZ container produced by a statically linked liblzma
+/// (`re-notes/15` §5: the writer emits `FD 37 7A 58 5A 00` + stream flags). How the per-file
+/// payloads are framed is still open ([U]), so this only exposes the primitive.
+pub fn decompress_xz(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Cursor;
+
+    if data.is_empty() {
+        return Err("Không có dữ liệu XZ để giải nén.".into());
+    }
+    let mut input = Cursor::new(data);
+    let mut out = Vec::new();
+    lzma_rs::xz_decompress(&mut input, &mut out)
+        .map_err(|e| format!("Giải nén XZ thất bại: {e}"))?;
+    Ok(out)
+}
+
+/// Size of one in-place decryption chunk (`push 10000h` in the header reader).
+pub const CHUNK_SIZE: usize = 64 * 1024;
+
+/// Decrypt a whole container: every 64 KiB chunk starts again from IV 0.
+///
+/// [O] The native reader zeroes its IV once and reuses it for each chunk; CBC chaining never
+/// crosses a chunk boundary (`re-notes/15` §4). `ciphertext` must be a multiple of 16 bytes.
+pub fn decrypt_container(ciphertext: &[u8], password: &[u8]) -> Result<Vec<u8>, String> {
+    if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
+        return Err(format!(
+            "Độ dài file cross DB không hợp lệ ({} byte, phải bội số của 16).",
+            ciphertext.len()
+        ));
+    }
+    let key = derive_key(password);
+    let mut out = Vec::with_capacity(ciphertext.len());
+    for (index, chunk) in ciphertext.chunks(CHUNK_SIZE).enumerate() {
+        let plain = decrypt_cbc_blocks(&key, &[0u8; 16], chunk)
+            .map_err(|e| format!("Chunk {index}: {e}"))?;
+        out.extend_from_slice(&plain);
+    }
+    Ok(out)
+}
+
+/// MD5 of the password, as 32 lowercase hex characters — the key that obfuscates the digest field.
+///
+/// [O] `0x2A050` hashes the password, formats 16 bytes with `"%02x"` into a global buffer and
+/// returns that buffer; the writer XORs its 32 hex characters into the stored digest.
+pub fn password_md5_hex(password: &[u8]) -> [u8; 32] {
+    use md5::Digest;
+
+    let digest = md5::Md5::digest(password);
+    let mut out = [0u8; 32];
+    for (i, byte) in digest.iter().enumerate() {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        out[i * 2] = HEX[(byte >> 4) as usize];
+        out[i * 2 + 1] = HEX[(byte & 0x0F) as usize];
+    }
+    out
+}
+
+/// De-obfuscate (or re-obfuscate — XOR is symmetric) the 32-byte digest field of a file blob.
+pub fn xor_digest(digest: &[u8; 32], password: &[u8]) -> [u8; 32] {
+    let key = password_md5_hex(password);
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = digest[i] ^ key[i];
+    }
+    out
+}
+
+/// Decrypt a container and parse the header of the resulting plaintext.
+///
+/// Returns the header plus the plaintext (still compressed: the payload is XZ; framing per file is
+/// described in `re-notes/16` and is **not** unpacked yet).
+pub fn decrypt_and_parse(
+    ciphertext: &[u8],
+    password: &[u8],
+) -> Result<(CrossDbHeader, Vec<u8>), String> {
+    let plain = decrypt_container(ciphertext, password)?;
+    let header = parse_header(&plain)?;
+    Ok((header, plain))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -465,8 +555,115 @@ mod tests {
         assert!(decrypt_with_password(password, b"").is_err());
     }
 
-    fn hex_vec(s: &str) -> Vec<u8> {
-        let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    /// XZ fixture produced with Python's `lzma.compress(..., format=FORMAT_XZ, preset=1)` on this
+    /// machine, so the decompressor is checked against an independent implementation.
+    #[test]
+    fn xz_decompresses_the_python_fixture() {        let fixture = hex_vec(
+            "fd377a585a000004e6d6b4460200210110000000a8708e860100355a4442342e302074657374\
+             207061796c6f616420666f722051547a616c6f2073796e635f763120787a206465636f6d70\
+             726573736f720000009123358d18df2c2900014e363942c6811fb6f37d010000000004595a",
+        );
+        assert!(looks_like_xz(&fixture));
+        let plain = decompress_xz(&fixture).unwrap();
+        assert_eq!(
+            plain,
+            b"ZDB4.0 test payload for QTzalo sync_v1 xz decompressor".to_vec()
+        );
+        // A decrypted cross DB starts with the container magic once decompressed.
+        assert!(plain.starts_with(MAGIC));
+    }
+
+    #[test]
+    fn xz_rejects_garbage_and_truncated_streams() {
+        assert!(!looks_like_xz(b""));
+        assert!(!looks_like_xz(b"ZDB4.0"));
+        assert!(decompress_xz(b"").is_err());
+        let mut bad = vec![0u8; 64];
+        bad[..6].copy_from_slice(XZ_MAGIC);
+        assert!(decompress_xz(&bad).is_err());
+        let mut truncated = hex_vec("fd377a585a000004e6d6b4460200210110000000a8708e86010035");
+        assert!(decompress_xz(&truncated).is_err());
+        truncated.clear();
+    }
+
+    fn encrypt_zero_iv(key: &[u8; 32], data: &[u8]) -> Vec<u8> {
+        use aes::cipher::block_padding::NoPadding;
+        use aes::cipher::{BlockEncryptMut, KeyIvInit};
+
+        assert_eq!(data.len() % 16, 0, "dữ liệu test phải bội số 16");
+        let mut buf = data.to_vec();
+        let enc = cbc::Encryptor::<aes::Aes256>::new(key.into(), (&[0u8; 16]).into());
+        enc.encrypt_padded_mut::<NoPadding>(&mut buf, data.len())
+            .unwrap();
+        buf
+    }
+
+    #[test]
+    fn password_md5_hex_matches_the_reference_digests() {
+        assert_eq!(password_md5_hex(b""), *b"d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(password_md5_hex(b"abc"), *b"900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(
+            password_md5_hex(b"The quick brown fox jumps over the lazy dog"),
+            *b"9e107d9d372bb6826bd81d3542a419d6"
+        );
+    }
+
+    #[test]
+    fn digest_obfuscation_is_symmetric_and_password_bound() {
+        let digest = *b"0123456789abcdef0123456789abcdef";
+        let masked = xor_digest(&digest, b"mat-khau");
+        assert_ne!(masked, digest);
+        assert_eq!(xor_digest(&masked, b"mat-khau"), digest);
+        assert_ne!(xor_digest(&digest, b"mat-khau-khac"), masked);
+        // Known pair: the mask is the 32 hex chars of MD5(password).
+        let expect: Vec<u8> = digest
+            .iter()
+            .zip(password_md5_hex(b"mat-khau").iter())
+            .map(|(a, b)| a ^ b)
+            .collect();
+        assert_eq!(masked.to_vec(), expect);
+    }
+
+    #[test]
+    fn container_decrypts_and_parses_the_header() {
+        let password = b"mat-khau-backup";
+        let header = build_header(&[("1.db", 16), ("2.db", 32)]);
+        let mut plain = header.clone();
+        plain.extend_from_slice(b"payload-gia-lap-cho-cross-db");
+        while plain.len() % 16 != 0 {
+            plain.push(0);
+        }
+        let key = derive_key(password);
+        let ciphertext = encrypt_zero_iv(&key, &plain);
+        let (parsed, out) = decrypt_and_parse(&ciphertext, password).unwrap();
+        assert_eq!(parsed.files.len(), 2);
+        assert_eq!(parsed.files[0].name, "1.db");
+        assert_eq!(&out[..header.len()], header.as_slice());
+        assert!(decrypt_and_parse(&ciphertext, b"sai-mat-khau").is_err());
+        assert!(decrypt_container(b"", password).is_err());
+        assert!(decrypt_container(&ciphertext[..ciphertext.len() - 1], password).is_err());
+    }
+
+    #[test]
+    fn multi_chunk_container_restarts_the_iv_per_chunk() {
+        let password = b"mat-khau-backup";
+        let key = derive_key(password);
+        let mut plain = Vec::new();
+        for i in 0..(CHUNK_SIZE / 16 + 2) {
+            plain.extend_from_slice(&(i as u128).to_le_bytes());
+        }
+        while plain.len() % 16 != 0 {
+            plain.push(0);
+        }
+        let mut ciphertext = Vec::new();
+        for chunk in plain.chunks(CHUNK_SIZE) {
+            ciphertext.extend_from_slice(&encrypt_zero_iv(&key, chunk));
+        }
+        assert!(ciphertext.len() > CHUNK_SIZE + 16);
+        assert_eq!(decrypt_container(&ciphertext, password).unwrap(), plain);
+    }
+
+    fn hex_vec(s: &str) -> Vec<u8> {        let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
         assert_eq!(cleaned.len() % 2, 0, "hex lẻ");
         (0..cleaned.len())
             .step_by(2)

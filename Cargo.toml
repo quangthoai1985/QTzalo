@@ -37,6 +37,7 @@ cpal = "0.15"
 opus = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 getrandom = "0.2"
+lzma-rs = { version = "0.3.0", default-features = false }
 
 [lib]
 name = "zalo_rust"
