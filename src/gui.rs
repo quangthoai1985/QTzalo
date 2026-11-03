@@ -110,6 +110,20 @@ pub enum GuiEvent {
     },
     /// Reaction changes from socket `612/610/611` or `lp_control` (`crate::reaction`).
     ReactionsReceived(Vec<crate::reaction::ReactionEvent>),
+    /// A reaction send failed: undo the optimistic update from the workspace.
+    ReactionFailed {
+        thread_id: String,
+        msg_id: String,
+        /// Empty means the failed action was removing a reaction (restore the snapshot).
+        emoji: String,
+        error: String,
+    },
+    /// Typing notification (`socket 602` / `lp_control` `act = "typing"`).
+    Typing {
+        thread_id: String,
+        name: String,
+        is_typing: bool,
+    },
     MessageDeleted {
         thread_id: String,
         msg_id: String,
@@ -532,6 +546,11 @@ pub struct ZaloGuiApp {
     nav_section: NavSection,
     /// `thread_id → "Tên đang nhập"` typing indicators shown above the composer.
     typing_indicators: HashMap<String, String>,
+    /// When each typing indicator was last refreshed; stale entries expire in `update`.
+    typing_seen: HashMap<String, std::time::Instant>,
+    /// Reactions captured before an optimistic removal, keyed `thread\u{1f}msg`, so a failed
+    /// send can restore exactly what was on screen (`reaction::restore_mine`).
+    reaction_rollbacks: HashMap<String, Vec<crate::reaction::MsgReaction>>,
     /// Known member counts for group threads (header subtitle "N thành viên").
     group_member_counts: HashMap<String, usize>,
     emoji_popup_open: bool,
@@ -883,6 +902,8 @@ impl ZaloGuiApp {
             demo_mode: false,
             nav_section: NavSection::Messages,
             typing_indicators: HashMap::new(),
+            typing_seen: HashMap::new(),
+            reaction_rollbacks: HashMap::new(),
             group_member_counts: HashMap::new(),
             emoji_popup_open: false,
             attach_menu_open: false,
@@ -1230,6 +1251,54 @@ impl ZaloGuiApp {
                         "Đã thả cảm xúc".into()
                     };
                 }
+                GuiEvent::ReactionFailed {
+                    thread_id,
+                    msg_id,
+                    emoji,
+                    error,
+                } => {
+                    // Undo the optimistic change the workspace applied before sending; a failed
+                    // removal restores the exact taps captured in `reaction_rollbacks`.
+                    let key = format!("{thread_id}\u{1f}{msg_id}");
+                    let snapshot = self.reaction_rollbacks.remove(&key);
+                    // `reaction` stores "me" as the `"0"` sentinel everywhere (`add_mine`,
+                    // `remove_mine`, `summary`), not the real UIN: pass the same value here or
+                    // neither rollback nor restore would match the optimistic entry.
+                    let uid = "0";
+                    let mut undone = false;
+                    if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread_id) {
+                        if let Some(m) = t.messages.iter_mut().find(|m| m.id == msg_id) {
+                            undone = if emoji.is_empty() {
+                                match snapshot {
+                                    Some(saved) => {
+                                        crate::reaction::restore_mine(&mut m.reactions, uid, &saved)
+                                    }
+                                    None => false,
+                                }
+                            } else {
+                                crate::reaction::rollback_mine(m, uid, &emoji)
+                            };
+                        }
+                    }
+                    if undone {
+                        self.persist_threads_async();
+                    }
+                    self.show_toast(format!("Thả cảm xúc thất bại: {error}"));
+                }
+                GuiEvent::Typing {
+                    thread_id,
+                    name,
+                    is_typing,
+                } => {
+                    if is_typing {
+                        self.typing_indicators.insert(thread_id.clone(), name);
+                        self.typing_seen
+                            .insert(thread_id, std::time::Instant::now());
+                    } else {
+                        self.typing_indicators.remove(&thread_id);
+                        self.typing_seen.remove(&thread_id);
+                    }
+                }
                 GuiEvent::MessageDeleted {
                     thread_id,
                     msg_id,
@@ -1538,6 +1607,23 @@ impl eframe::App for ZaloGuiApp {
         ctx.request_repaint_after(Duration::from_millis(1200));
 
         let pal = self.palette();
+
+        // Typing indicators expire ~6 s after the last event: Zalo sends no explicit "stopped
+        // typing" event for every case, and a stale "đang nhập" is worse than a missing one.
+        let stale_typing: Vec<String> = self
+            .typing_seen
+            .iter()
+            .filter(|(_, at)| at.elapsed() > Duration::from_secs(6))
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect();
+        for thread_id in stale_typing {
+            self.typing_seen.remove(&thread_id);
+            self.typing_indicators.remove(&thread_id);
+        }
+        // Bound the rollback map the same way (one entry per failed send is enough to diagnose).
+        if self.reaction_rollbacks.len() > 64 {
+            self.reaction_rollbacks.clear();
+        }
 
         Self::handle_frameless_resize(ctx);
         self.render_custom_title_bar(ctx, &pal);

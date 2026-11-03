@@ -25,7 +25,7 @@ use serde_json::Value;
 
 use crate::chat::{PollState, QueueCursor};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// `queueStatus[q].ids` / `preIds` kept per queue (Zalo PC keeps at most 10).
 const MAX_PRE_IDS: usize = 10;
 
@@ -36,6 +36,10 @@ pub struct SyncState {
     pub poll: PollState,
     #[serde(default)]
     pub ws_queues: BTreeMap<String, QueueCursor>,
+    /// Cursor of the `lp_control` long-poll (call/reaction/transfer control events).
+    /// Added in version 2; version-1 files load with the default (a full control re-pull).
+    #[serde(default)]
+    pub ctrl: crate::call::CtrlPollState,
     #[serde(default)]
     pub updated_at_ms: i64,
 }
@@ -47,6 +51,7 @@ impl SyncState {
             uin: uin.to_string(),
             poll: PollState::default(),
             ws_queues: BTreeMap::new(),
+            ctrl: crate::call::CtrlPollState::default(),
             updated_at_ms: 0,
         }
     }
@@ -500,5 +505,40 @@ mod tests {
         assert!(MsgIdClock::fit(&[(10, 1000)]).is_none());
         assert!(MsgIdClock::fit(&[(10, 1000), (20, 2000)]).is_none(), "< 1 minute apart");
         assert!(MsgIdClock::fit(&[(20, 1000), (10, 900_000)]).is_none(), "negative slope");
+    }
+
+    #[test]
+    fn version_one_file_still_loads_and_gets_the_ctrl_default() {
+        let path = tmp("v1");
+        // A real v0.1.3 file: `version: 1`, no `ctrl` field at all.
+        let v1 = json!({
+            "version": 1,
+            "uin": "123",
+            "poll": { "last_action_id": "9", "last_action_id_other": "8", "queues": {} },
+            "ws_queues": {},
+            "updated_at_ms": 7
+        });
+        std::fs::write(&path, v1.to_string()).unwrap();
+        let st = SyncState::load_from(&path, "123");
+        assert_eq!(st.poll.last_action_id, "9");
+        assert_eq!(st.ctrl, crate::call::CtrlPollState::default());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ctrl_cursor_survives_a_save_load_cycle() {
+        let path = tmp("ctrl");
+        let mut st = SyncState::new("123");
+        st.ctrl.last_action_id = "555".into();
+        st.ctrl.queues.insert(
+            "603_1".into(),
+            QueueCursor { last_id: "777".into(), ids: vec!["776".into()] },
+        );
+        st.save_to(&path).unwrap();
+        let back = SyncState::load_from(&path, "123");
+        assert_eq!(back.ctrl.last_action_id, "555");
+        assert_eq!(back.ctrl.queues.get("603_1").map(|c| c.last_id.as_str()), Some("777"));
+        assert_eq!(back.version, VERSION);
+        let _ = std::fs::remove_file(&path);
     }
 }

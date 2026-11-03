@@ -465,8 +465,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
 
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
     let poll_state = std::sync::Arc::new(tokio::sync::Mutex::new(saved.poll));
-    let ctrl_poll_state =
-        std::sync::Arc::new(tokio::sync::Mutex::new(crate::call::CtrlPollState::default()));
+    let ctrl_poll_state = std::sync::Arc::new(tokio::sync::Mutex::new(saved.ctrl.clone()));
     let cancels: CancelRegistry = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
 
     std::thread::Builder::new()
@@ -513,6 +512,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                     let s_sv = session.clone();
                     let ps_sv = poll_state.clone();
                     let wc_sv = ws_cursors.clone();
+                    let cps_sv = ctrl_poll_state.clone();
                     tokio::spawn(async move {
                         let mut last_saved: Option<crate::sync_state::SyncState> = None;
                         loop {
@@ -531,6 +531,16 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                             let mut st = crate::sync_state::SyncState::new(&uin);
                             st.poll = poll;
                             st.ws_queues = wc_sv.lock().map(|c| c.clone()).unwrap_or_default();
+                            // The `lp_control` cursor is held by its own poller; keep the previous
+                            // value instead of persisting a default when the lock is busy.
+                            match cps_sv.try_lock() {
+                                Ok(ctrl) => st.ctrl = ctrl.clone(),
+                                Err(_) => {
+                                    if let Some(prev) = last_saved.as_ref() {
+                                        st.ctrl = prev.ctrl.clone();
+                                    }
+                                }
+                            }
                             if last_saved.as_ref() == Some(&st) {
                                 continue;
                             }
@@ -584,6 +594,18 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                                 crate::call::extract_voip_controls(data_node)
                                             {
                                                 cb.handle_control_event(voip_ev);
+                                            }
+                                            // Typing notifications travel on the same control
+                                            // frames (`602` / `lp_control`, `act = "typing"`).
+                                            for typing in
+                                                crate::call::extract_typing_events(data_node)
+                                            {
+                                                let _ = gui_tx_ws.send(GuiEvent::Typing {
+                                                    thread_id: typing.thread_id,
+                                                    name: typing.name,
+                                                    is_typing: typing.is_typing,
+                                                });
+                                                ctx_ws.request_repaint();
                                             }
                                             if matches!(
                                                 ev.cmd,
@@ -674,6 +696,16 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 if let Ok(poll) = ctrl_res {
                                     for ev in poll.voip {
                                         cb.handle_control_event(ev);
+                                    }
+                                    for typing in
+                                        crate::call::extract_typing_events(&poll.data)
+                                    {
+                                        let _ = gui_tx_ctrl.send(GuiEvent::Typing {
+                                            thread_id: typing.thread_id,
+                                            name: typing.name,
+                                            is_typing: typing.is_typing,
+                                        });
+                                        ctx_ctrl.request_repaint();
                                     }
                                     send_reactions(&poll.data, &s_snap, &gui_tx_ctrl, &ctx_ctrl);
                                 } else {
@@ -1481,15 +1513,23 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                             resp_error_code(&resp).unwrap_or(0)
                                         );
                                         crate::logger::log_error("gui::react", &err_s);
-                                        let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(format!(
-                                            "Thả cảm xúc thất bại: {err_s}"
-                                        )));
+                                        // Undo the optimistic bubble change (workspace already
+                                        // added/removed the reaction before sending).
+                                        let _ = gui_tx_clone.send(GuiEvent::ReactionFailed {
+                                            thread_id: to_id,
+                                            msg_id: msg.id.clone(),
+                                            emoji: reaction,
+                                            error: err_s,
+                                        });
                                     }
                                     Err(e) => {
                                         crate::logger::log_error("gui::react", &e.to_string());
-                                        let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(format!(
-                                            "Thả cảm xúc thất bại: {e}"
-                                        )));
+                                        let _ = gui_tx_clone.send(GuiEvent::ReactionFailed {
+                                            thread_id: to_id,
+                                            msg_id: msg.id.clone(),
+                                            emoji: reaction,
+                                            error: e.to_string(),
+                                        });
                                     }
                                 }
                                 ctx_clone.request_repaint();
@@ -2123,7 +2163,9 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                 let result = match crate::download::validate_target_dir(&dest_dir) {
                                     Err(e) => Err(e),
                                     Ok(dir) => {
-                                        let client = { session_clone.lock().await.clone().http };
+                                        // Streaming client: no total timeout, so a large file on a
+                                        // slow link is not aborted after 35 s.
+                                        let client = session_clone.lock().await.streaming_http();
                                         let tx = gui_tx_clone.clone();
                                         let ctx = ctx_clone.clone();
                                         let key = url.clone();
@@ -2184,7 +2226,7 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                     if let Ok(mut map) = cancels_task.lock() {
                                         map.insert(url.clone(), flag.clone());
                                     }
-                                    let client = { session_clone.lock().await.clone().http };
+                                    let client = session_clone.lock().await.streaming_http();
                                     let tx = gui_tx_clone.clone();
                                     let ctx = ctx_clone.clone();
                                     let key = url.clone();

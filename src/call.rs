@@ -834,7 +834,12 @@ async fn dispatch_send_signal_inner(s: &Session, command: i64, n: &Value) -> Res
 // ---------------------------------------------------------------------------
 
 /// State machine for `lp_control` (`p4-ctl-chat.zaloapp.com`, `queueIds: ["4", "5"]`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Serialized as-is into the per-account sync file so a later session resumes from the stored
+/// cursor instead of replaying the whole control queue. `#[serde(default)]` keeps files written
+/// before a field existed loadable (missing fields come from the [`Default`] impl below).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct CtrlPollState {
     pub last_action_id: String,
     pub last_action_id_other: String,
@@ -978,6 +983,180 @@ pub fn extract_voip_controls(data_node: &Value) -> Vec<Value> {
         voip_events.push(content);
     }
     voip_events
+}
+
+/// One "đang nhập" (typing) notice decoded from a `lp_control` / socket-`602` control event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypingEvent {
+    pub thread_id: String,
+    pub name: String,
+    pub is_typing: bool,
+}
+
+/// Extract `typing` controls from a decrypted `getControllFromPolling` payload (socket `602`).
+///
+/// Same input shape as [`extract_voip_controls`]: `data_node["controls"]`, where each item may
+/// carry a `content` object or a JSON-encoded string that has to be decoded first. Controls that
+/// are not typing (including `act_type == "voip"`, which shares this array) and malformed items
+/// are skipped; nothing here can panic on a malformed reply.
+///
+/// [I] The exact field names are inferred — only one captured shape is available — so several
+/// spellings are accepted until a live sample pins them down:
+/// - `act` / `act_type` `"typing"` starts a notice, `"typing_end"` stops it.
+/// - conversation id: `toid` first for a 1-1 chat, `id` first for a group (aliases `threadId`,
+///   `conversationId`, `groupId`). Group ids are normalized by stripping the `group_`/`g` prefix,
+///   like the rest of this module does for group conversations.
+/// - sender name: `dName`, then `name`, then `fromName`.
+/// - `is_typing`: an explicit `typing` (or inverse `expired`) field wins, otherwise the notice is
+///   "typing" unless it is a `typing_end`.
+pub fn extract_typing_events(data_node: &Value) -> Vec<TypingEvent> {
+    let mut out = Vec::new();
+    let Some(controls) = data_node.get("controls").and_then(Value::as_array) else {
+        return out;
+    };
+    for item in controls {
+        let Some(content) = control_content(item) else {
+            continue;
+        };
+        let act = str_at(&content, &["act"]);
+        let data = control_data(&content);
+        let act_type = str_at(&data, &["act_type"]).or_else(|| str_at(&content, &["act_type"]));
+        // VoIP controls share the same array; they are not typing notices.
+        if act.as_deref() == Some("voip") || act_type.as_deref() == Some("voip") {
+            continue;
+        }
+        let typing_end =
+            act.as_deref() == Some("typing_end") || act_type.as_deref() == Some("typing_end");
+        let typing = act.as_deref() == Some("typing") || act_type.as_deref() == Some("typing");
+        if !typing && !typing_end {
+            continue;
+        }
+        let is_group = typing_is_group(&data, act.as_deref(), act_type.as_deref());
+        let raw_id = typing_thread_id(&data, is_group);
+        if raw_id.is_empty() {
+            continue;
+        }
+        let name = str_at(&data, &["dName", "name", "fromName"])
+            .or_else(|| str_at(&content, &["dName", "name", "fromName"]))
+            .unwrap_or_default();
+        let is_typing = match flag_at(&data, "typing") {
+            Some(v) => v,
+            None => match flag_at(&data, "expired") {
+                Some(v) => !v,
+                None => !typing_end,
+            },
+        };
+        out.push(TypingEvent {
+            thread_id: normalize_group_id(&raw_id),
+            name,
+            is_typing,
+        });
+    }
+    out
+}
+
+/// `item["content"]`: either the object itself or a JSON string that has to be decoded first.
+fn control_content(item: &Value) -> Option<Value> {
+    let raw = item.get("content")?;
+    match raw {
+        Value::Object(_) => Some(raw.clone()),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+                return None;
+            }
+            serde_json::from_str::<Value>(trimmed)
+                .ok()
+                .filter(Value::is_object)
+        }
+        _ => None,
+    }
+}
+
+/// `content["data"]` as an object; a JSON string is decoded, and a missing/non-object value falls
+/// back to the control itself so fields carried at the top level still work.
+fn control_data(content: &Value) -> Value {
+    match content.get("data") {
+        Some(Value::Object(_)) => content.get("data").cloned().unwrap_or(Value::Null),
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.starts_with('{') || trimmed.starts_with('[') {
+                if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+                    if parsed.is_object() {
+                        return parsed;
+                    }
+                }
+            }
+            content.clone()
+        }
+        _ => content.clone(),
+    }
+}
+
+/// Non-empty string (or numeric id rendered as text) at the first key that has one.
+fn str_at(node: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        match node.get(*key) {
+            Some(Value::String(s)) if !s.trim().is_empty() => return Some(s.trim().to_string()),
+            Some(Value::Number(n)) => return Some(n.to_string()),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Boolean-ish JSON value: `true`/`false`, `0`/`1`, `"0"`/`"1"`, `"true"`/`"false"`.
+fn flag_at(node: &Value, key: &str) -> Option<bool> {
+    match node.get(key)? {
+        Value::Bool(b) => Some(*b),
+        Value::Number(n) => n.as_i64().map(|v| v != 0),
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => Some(true),
+            "0" | "false" | "no" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// [I] A typing control belongs to a group when it says so (`isGroup`, `groupId`) or when its act
+/// tag mentions `group`; otherwise it is a 1-1 conversation.
+fn typing_is_group(data: &Value, act: Option<&str>, act_type: Option<&str>) -> bool {
+    if flag_at(data, "isGroup") == Some(true) {
+        return true;
+    }
+    if str_at(data, &["groupId"]).is_some() {
+        return true;
+    }
+    act.or(act_type)
+        .map(|tag| tag.contains("group"))
+        .unwrap_or(false)
+}
+
+/// [I] `toid` is the 1-1 conversation id and `id` is the group id; when both are present the
+/// group/1-1 order decides which one wins. Aliases are accepted as a fallback.
+fn typing_thread_id(data: &Value, is_group: bool) -> String {
+    let keys: &[&str] = if is_group {
+        &["id", "groupId", "toid", "threadId", "conversationId"]
+    } else {
+        &["toid", "threadId", "conversationId", "id"]
+    };
+    str_at(data, keys).unwrap_or_default()
+}
+
+/// Strip a `group_` / `group` / `g` prefix from a group conversation id, like the rest of this
+/// module. Numeric ids (1-1 and already-normalized group ids) are returned unchanged.
+fn normalize_group_id(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .trim_start_matches("group_")
+        .trim_start_matches("group")
+        .trim_start_matches(['g', 'G']);
+    if stripped.is_empty() {
+        trimmed.to_string()
+    } else {
+        stripped.to_string()
+    }
 }
 
 /// One `lp_control` reply: its VoIP control events and the whole `data` node (which also
@@ -3089,6 +3268,110 @@ mod tests {
         // Strings are accepted too, matching the loosely-typed official payload.
         assert_eq!(call_type_from_payload(&json!({ "typeRequest": "6" })), 6);
         assert_eq!(call_type_from_payload(&json!({ "typeRequest": "x", "type": 3 })), 3);
+    }
+
+    #[test]
+    fn ctrl_poll_state_roundtrips_and_accepts_partial_or_empty_json() {
+        let mut st = CtrlPollState::default();
+        st.last_action_id = "4242".into();
+        st.last_action_id_other = "7".into();
+        st.queues.insert(
+            "603_1".into(),
+            QueueCursor {
+                last_id: "99".into(),
+                ids: vec!["97".into(), "98".into()],
+            },
+        );
+        st.queues.insert(
+            "604_0".into(),
+            QueueCursor {
+                last_id: "5".into(),
+                ids: vec!["4".into(), "5".into()],
+            },
+        );
+
+        let text = serde_json::to_string(&st).expect("serialize CtrlPollState");
+        let back: CtrlPollState = serde_json::from_str(&text).expect("deserialize CtrlPollState");
+        assert_eq!(back, st);
+
+        // Files written before a field existed must still load: `#[serde(default)]`.
+        let partial: CtrlPollState =
+            serde_json::from_str(r#"{"last_action_id":"9"}"#).expect("partial CtrlPollState");
+        assert_eq!(partial.last_action_id, "9");
+        assert_eq!(partial.queues, CtrlPollState::default().queues);
+
+        let empty: CtrlPollState = serde_json::from_str("{}").expect("empty CtrlPollState");
+        assert_eq!(empty, CtrlPollState::default());
+    }
+
+    #[test]
+    fn typing_events_cover_direct_group_voip_garbage_and_typing_end() {
+        let data_node = json!({
+            "controls": [
+                // 1-1 typing: `content` is an object and `toid` wins for a direct chat.
+                { "content": {
+                    "act": "typing",
+                    "data": { "toid": "123456789", "dName": "Nguyễn Văn A" }
+                }},
+                // Group typing: `content` is a JSON string and the `group_` prefix is stripped.
+                { "content": "{\"act\":\"typing\",\"data\":{\"id\":\"group_987654321\",\"dName\":\"Nhóm Thiết kế\",\"isGroup\":1}}" },
+                // A VoIP control shares this array and must be ignored.
+                { "content": { "act": "typing", "act_type": "voip", "data": { "toid": "111", "dName": "X" } } },
+                // Malformed items must be skipped, never panic.
+                { "content": "not json" },
+                { "nope": 1 },
+                // `typing_end` stops typing.
+                { "content": {
+                    "act": "typing",
+                    "act_type": "typing_end",
+                    "data": { "toid": "123456789", "dName": "Nguyễn Văn A" }
+                }},
+                // An explicit `expired` flag also stops typing.
+                { "content": {
+                    "act": "typing",
+                    "data": { "toid": "555", "dName": "Trần B", "expired": 1 }
+                }},
+            ]
+        });
+
+        let got = extract_typing_events(&data_node);
+        assert_eq!(got.len(), 4, "{got:?}");
+        assert_eq!(
+            got[0],
+            TypingEvent {
+                thread_id: "123456789".into(),
+                name: "Nguyễn Văn A".into(),
+                is_typing: true,
+            }
+        );
+        assert_eq!(
+            got[1],
+            TypingEvent {
+                thread_id: "987654321".into(),
+                name: "Nhóm Thiết kế".into(),
+                is_typing: true,
+            }
+        );
+        assert_eq!(
+            got[2],
+            TypingEvent {
+                thread_id: "123456789".into(),
+                name: "Nguyễn Văn A".into(),
+                is_typing: false,
+            }
+        );
+        assert_eq!(
+            got[3],
+            TypingEvent {
+                thread_id: "555".into(),
+                name: "Trần B".into(),
+                is_typing: false,
+            }
+        );
+
+        // No `controls` node at all -> empty, exactly like `extract_voip_controls`.
+        assert!(extract_typing_events(&json!({ "data": {} })).is_empty());
+        assert!(extract_typing_events(&json!({ "controls": [] })).is_empty());
     }
 
     #[test]
