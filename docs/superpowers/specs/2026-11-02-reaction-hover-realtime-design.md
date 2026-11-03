@@ -3,6 +3,25 @@
 > Ngày 2026-11-02, nhánh `claude/v0.1.3`. Người dùng đã duyệt thiết kế trong phiên chat ngày 2026-11-02.
 > Bằng chứng giao thức: `re-notes/10_bang_chung_dong_bo.md` §17 (trace thật, tối 02/11). Nhãn **[O]** = đã quan sát, **[I]** = suy luận, **[U]** = chưa biết.
 
+## 0. Sửa đổi sau nghiệm thu (2026-11-03, người dùng duyệt)
+
+Bằng chứng: `re-notes/10` §18–19. Các điểm dưới đây **thay** cho những chỗ tương ứng ở §3, §5, §6 và §8:
+
+- **Đếm cộng dồn giống Zalo** (người dùng chọn):
+  - mỗi lần bấm là một mục `MsgReaction`; chọn cảm xúc khác thì thêm, không thay;
+  - sự kiện trùng (cùng người, cùng cảm xúc, cùng `ts`) chỉ đếm một lần;
+  - gỡ cảm xúc xoá hết các lần bấm của người đó và để lại một mốc gỡ;
+  - chip đếm theo số **lần bấm**; `mine` là cảm xúc mình thả gần nhất.
+- **Hành vi bấm:**
+  - mỗi lần bấm, kể cả bấm lại cảm xúc đã chọn, đều gửi đi và cộng thêm một; nút tròn luôn gửi 👍;
+  - `set_mine` được thay bằng `add_mine` (thêm một lần bấm đang chờ, `ts = 0`, sự kiện máy chủ gửi về sẽ chốt nó) và `remove_mine`.
+- **Định danh tin:**
+  - `ChatMessage.cli_msg_id` lưu `cliMsgId`;
+  - khi gửi: `gMsgID` dạng số, `cMsgID = cliMsgId` (chỉ dùng `ts` khi thiếu), ảnh mang `msgType 32`;
+  - khi nhận: sự kiện có `gMsgID = 0` được khớp với tin theo `cliMsgId`.
+  - Tin cũ do chính mình gửi trong hội thoại 1-1 chưa có `cliMsgId` thì vẫn chưa khớp được, vì QTzalo không tải lại lịch sử 1-1.
+- `lp_control` chỉ gửi lại tối đa 10 id mới nhất của mỗi queue (trước đây gửi cả danh sách, gây lỗi 413).
+
 ## 1. Mục tiêu
 
 Người dùng nêu: "thiếu chức năng thả biểu tượng cảm xúc khi rê chuột vào mỗi tin nhắn". Người dùng chọn phạm vi "rê chuột + nhận realtime".

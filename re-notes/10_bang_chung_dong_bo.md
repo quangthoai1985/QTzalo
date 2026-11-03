@@ -233,6 +233,28 @@ Hai lượt chạy với tài khoản thật, `ZCALL_WS_TRACE=1`. Người dùng
 - Điện thoại gỡ rồi thả: thêm hai `612` (`rIcon` dài 0, rồi dài 2), `uidFrom = "0"`, không có `POST` nào từ QTzalo.
 - → **Gỡ cảm xúc là `rIcon = ""`: xác nhận** (trước đây ghi [I] theo zca-js). Mỗi thao tác thả hoặc gỡ là một sự kiện `612` riêng.
 
+## Tối 03/11 — reaction trên tin của chính mình, đếm cộng dồn (20:39–21:20)
+
+Người dùng báo: trong "Cloud của tôi", cảm xúc thả từ điện thoại không hiện trong QTzalo, và ngược lại. Lượt chẩn đoán dùng các dòng trace tạm, chỉ in id và mã cảm xúc; các dòng này đã gỡ khỏi mã.
+
+### 19. Tin của chính mình được định danh bằng `cliMsgId`; mỗi lần bấm là một sự kiện [O]
+
+- **Chẩn đoán** (bản `fc39dbf`, 20:39–20:43). Lần này người dùng thử trong một hội thoại 1-1, trên tin do chính mình gửi:
+  - Điện thoại thả rồi gỡ trên một **ảnh mình đã gửi**: `rMsg = [{gMsgID: 0, cMsgID: <cliMsgId của ảnh>, msgType: 32}]`, kèm `msgSender` (9 ký tự, cố định) và `source: 0`. `cliMsgId` nhỏ hơn `ts` máy chủ mà QTzalo đã lưu 127 ms.
+  - QTzalo gửi `gMsgID` dạng **chuỗi**, `cMsgID = ts`, `msgType: 1` → điện thoại không hiện.
+  - QTzalo bỏ qua sự kiện có `gMsgID = 0` → app không hiện.
+  - Lượt A (§18) chạy được vì khi đó người dùng thả vào tin của **người khác**, vốn có `gMsgID` thật.
+- **Sau khi sửa** (`3200051`, 20:51–20:58, "Cloud của tôi"):
+  - QTzalo gửi `gMsgID` dạng số và `cMsgID = cliMsgId` thật của tin.
+  - Điện thoại gửi `gMsgID = 0` kèm đúng `cMsgID` đó; QTzalo tìm ra tin theo `cliMsgId`.
+  - Người dùng xác nhận hai bên khớp.
+  - Với tin **cũ hơn** trong Cloud (tệp `msgType 46`, ảnh `msgType 32`), điện thoại vẫn gửi `gMsgID` thật. Chỉ những tin gửi gần đây mới mang `gMsgID = 0`.
+- **Đếm cộng dồn:**
+  - Bấm ❤ ba lần trên điện thoại sinh ra ba sự kiện `612` riêng (20:53:43, :47, :48). Chọn cảm xúc khác thì cảm xúc đó được **thêm** vào, không thay cảm xúc cũ. Gỡ thì xoá hết cảm xúc của người đó.
+  - Người dùng chọn cách đếm giống Zalo (`3ef7335`).
+  - Kiểm chứng lúc 21:19: QTzalo thả ❤, 😆, 😠 rồi gỡ; điện thoại thả thêm. Hai bên khớp.
+- `rType` quan sát được: `/-heart` 5, `:>` 0, `:-h` 20, gỡ −1 (khớp `chat::reaction_code_and_type`). `msgType` của `rMsg`: 1 là văn bản, 32 là ảnh, 46 là tệp.
+
 ## Kết luận theo giả thiết
 
 | Giả thiết (nguồn) | Kết luận |
@@ -252,3 +274,5 @@ Hai lượt chạy với tài khoản thật, `ZCALL_WS_TRACE=1`. Người dùng
 | Reaction đến qua socket `612` lúc mở app và qua `610_1/611_1` lúc tắt (v0.1.3) | **Xác nhận** `612` và `610_1` (§17); `611_1` chưa có dữ liệu. `lp_control` cũng trả reaction từ lúc đăng nhập |
 | Gỡ cảm xúc là `rIcon = ""`, `rType = -1` (zca-js) | **Xác nhận** (§18): máy chủ nhận và phát lại `612` có `rIcon` rỗng, cả khi gỡ từ QTzalo lẫn từ điện thoại |
 | `lp_control` gửi lại mọi `ids` của queue | **Bác bỏ**: phải giữ tối đa 10 id mới nhất, nếu không sẽ bị 413 khi danh sách dài (§18) |
+| Reaction luôn nhắm tin bằng `gMsgID` | **Bác bỏ** (§19): với tin vừa gửi của chính mình, `gMsgID = 0` và tin được định danh bằng `cliMsgId` |
+| Mỗi người một reaction (spec v0.1.3 §3) | **Bác bỏ** (§19): Zalo đếm mỗi lần bấm, các cảm xúc khác nhau cộng dồn; QTzalo nay làm theo |

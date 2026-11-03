@@ -13,7 +13,10 @@ Trọng tâm: thả cảm xúc ngay khi rê chuột, và thấy cảm xúc của
 - **Thả cảm xúc khi rê chuột:**
   - Rê chuột vào tin thì hiện một nút tròn cạnh bong bóng; bấm vào là thả 👍.
   - Dừng chuột trên nút thì bung thanh 6 cảm xúc. Nếu bạn đã thả, thanh có thêm nút ✕ để gỡ.
-- **Chip cảm xúc:** đếm theo số người; rê lên chip thì hiện chi tiết, ví dụ "❤️ 2 · 😆 1 — có bạn".
+- **Đếm cảm xúc giống Zalo:**
+  - mỗi lần bấm cộng thêm một; chọn cảm xúc khác thì thêm cạnh cảm xúc cũ;
+  - nút ✕ gỡ hết cảm xúc của bạn trên tin;
+  - rê lên chip thì hiện chi tiết, ví dụ "❤️ 3 · 😆 1 — có bạn".
 - **Cảm xúc theo thời gian thực:**
   - Cảm xúc của người khác, và của chính bạn thả từ điện thoại, hiện ngay (socket `612`).
   - Cảm xúc thả lúc QTzalo tắt được bù khi mở app (queue `610`/`611` và `lp_control`).
@@ -21,7 +24,7 @@ Trọng tâm: thả cảm xúc ngay khi rê chuột, và thấy cảm xúc của
 ### Sửa lỗi
 
 - Thả cảm xúc không còn xoá cảm xúc của người khác trên cùng tin.
-- Bấm lại đúng cảm xúc đang chọn thì không gửi gì nữa. Trước đây app xoá cảm xúc trên máy nhưng vẫn gửi lệnh thả lên máy chủ.
+- Cảm xúc trên **tin của chính bạn** (kể cả mọi tin trong "Cloud của tôi") nay hiện đúng cả hai chiều. Zalo định danh những tin này bằng `cliMsgId`; trước đây QTzalo gửi sai id và bỏ qua sự kiện từ điện thoại.
 - `lp_control` (kênh dự phòng cho sự kiện cuộc gọi): khi danh sách id của queue dài, mọi lần kéo sau lần đầu đều bị máy chủ trả 413. Nay QTzalo chỉ gửi 10 id mới nhất, như Zalo PC.
 
 ### Ghi chú
