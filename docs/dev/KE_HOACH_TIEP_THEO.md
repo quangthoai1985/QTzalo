@@ -1,6 +1,10 @@
 # Kế hoạch công việc tiếp theo — v0.1.2 và nghiên cứu Sync V1
 
 > Viết ngày 2026-11-01, sau khi phát hành v0.1.1 (`main` = `d8ba11c`, nghiên cứu ở `adc597f`).
+> **Cập nhật 2026-11-03:**
+> - v0.1.3 đã phát hành: thả cảm xúc khi rê chuột, reaction theo thời gian thực, đếm cộng dồn giống Zalo (`CHANGELOG.md`, `re-notes/10` §17–19). Việc này nằm ngoài kế hoạch: người dùng yêu cầu.
+> - **Phần B đang làm:** B3.1 và B3.2 đã xong (`re-notes/11_sync_v1.md`). **Việc tiếp theo là B3.3.** Script đọc `app.asar`: `scripts/re/asar_map.py`, `scripts/re/asar_snip.py`.
+>
 > **Cập nhật 2026-11-02: Phần A đã làm xong trong v0.1.2** (xem "Thiết kế đã chốt sau A0" ở §1, `CHANGELOG.md`, `re-notes/10`). Đã nghiệm thu với tài khoản thật. **Việc tiếp theo là Phần B**, chỉ làm khi người dùng đồng ý; đọc thêm `re-notes/09` §9 (đánh giá lại Sync V1 sau tài liệu phía Android).
 > Đọc kèm: `docs/dev/BAN_GIAO.md` (trạng thái, quy trình, bài học) và `re-notes/09_dong_bo_tin_nhan.md` (cơ chế đồng bộ của Zalo PC, có nhãn [O]/[I]/[U]).
 > Phiên tiếp theo chạy **trên PC Windows của người dùng**: có Zalo PC thật, tài khoản Zalo thật, điện thoại thật. Xem §3 để chuẩn bị môi trường.
@@ -153,13 +157,13 @@ Dọn: GET /api/message/delete_snapshot_mobile_msg (12003) {public_key, imei}
 
 ### B3. Các bước nghiên cứu
 
-1. **Giải nén và lập bản đồ** (không chạy gì):
+1. **[Đã xong 2026-11-02, `re-notes/11`]** **Giải nén và lập bản đồ** (không chạy gì). Thực tế không cần giải nén: `scripts/re/asar_map.py` đọc thẳng header của asar.
    - `npx @electron/asar extract app.asar %USERPROFILE%\zalo-re\app`.
    - Tìm các module native: `Get-ChildItem -Recurse -Filter *.node` — tìm `db-cross-v4`, sqlite, sqlcipher.
    - Grep các chuỗi: `pull_mobile_msg`, `BACKUP_SUCCESS`, `encrypted_key`, `decompressAndDecryptDb`, `DECRYPT_BACKUP`, `RESTORE_CONVERSATIONS`, `RESTORE_MESSAGES`, `db_format`, `temp_key`, `sync_cross_state`, `cancel_pull_mobile_msg`.
    - Ghi vào `re-notes/11_sync_v1.md`: file nào, offset nào, đoạn mã ngắn đã làm gọn (đủ để hiểu, không chép cả khối).
-2. **Xác định kênh nhận `BACKUP_SUCCESS`**: control event đi qua cmd nào (`601`/`602`/`603`?), trường `act`/`act_type` gì. QTzalo đã có `call::extract_voip_controls` lọc `act_type == "voip"` → cần một bộ lọc tương tự cho sự kiện transfer.
-3. **Định dạng `db-cross-v4`:**
+2. **[Đã xong 2026-11-03, `re-notes/11` §B3.2: `act = "syncmsg_info"`, cùng các `user_confirm` / `transfer_error`; đến qua control event (`603_1` / `lp_control`), `act_type` chưa rõ]** **Xác định kênh nhận `BACKUP_SUCCESS`**: control event đi qua cmd nào (`601`/`602`/`603`?), trường `act`/`act_type` gì. QTzalo đã có `call::extract_voip_controls` lọc `act_type == "voip"` → cần một bộ lọc tương tự cho sự kiện transfer.
+3. **[TIẾP THEO]** **Định dạng `db-cross-v4`.** Đã biết từ B3.1: chỉ có bản `electron_x86` (ia32); `format 0` gọi `decompressAndDecryptDb(in, out, privateKey)`, `format 1` gọi `decompressAndDecryptDb_V2(in, out, privateKey.toUpperCase(), onProgress)`:
    - `dumpbin /exports <file>.node` + `strings` để tìm tên hàm, thư viện nén (zstd/lz4/zlib/brotli), thuật toán (AES-CBC/GCM, ChaCha, PBKDF2/SHA), dấu hiệu SQLCipher.
    - **Dùng module làm "hộp đen" (oracle):** chạy chính `.node` bằng Node cùng ABI với Electron của Zalo. Thử `ELECTRON_RUN_AS_NODE=1 Zalo.exe script.js`; fuse `RunAsNode` có thể đã tắt, khi đó tải đúng phiên bản Electron. Đưa vào một file backup thật (từ B4) để ra DB giải mã, rồi xem schema bằng `sqlite3`.
    - Mục tiêu: mô tả định dạng đủ để **viết lại bằng Rust**. Nếu không viết lại được thì ghi rõ và dừng; **không** đóng gói hay gọi module native của Zalo trong QTzalo.
@@ -230,6 +234,9 @@ cargo test --locked
 
 | Việc | Ghi chú |
 |---|---|
+| (0.1.3) Reaction trên tin cũ của chính mình (1-1) | Thiếu `cliMsgId` cho các dòng lưu trước 0.1.3. Có thể khớp mờ theo `ts ≈ cliMsgId` (trong ảnh đã thấy lệch 127 ms), hoặc học `cliMsgId` từ sự kiện của điện thoại |
+| (0.1.3) Reaction trong nhóm từ QTzalo | Chưa thử với tài khoản thật (`/api/group/reaction`). `msgType` của tệp/video/voice/nhãn dán chưa kiểm chứng |
+| (0.1.3) Hiệu năng hover | Phần xử lý rê chuột chạy cho mọi bong bóng mỗi khung hình; nên trả về sớm khi bong bóng ngoài vùng hiển thị và tính phần tóm tắt một lần |
 | Kiểm chứng tính năng 0.1.1 trên Windows thật | MotW (`Get-Content <file> -Stream Zone.Identifier`), "Mở thư mục" (`explorer /select`), hộp chọn thư mục, xoá cache, số thành viên nhóm (`totalMember`) |
 | (0.1.2) TUI/CLI chưa dùng con trỏ bền | `src/main.rs`, `src/tui.rs` vẫn dùng `PollState::default()`; GUI đã có `sync_state` |
 | (0.1.2) Hàng đợi phình vì không ACK | Kéo về không xoá tin khỏi hàng đợi (`re-notes/10` §7); không ACK thì có thể bị `evict` sớm. Cân nhắc `DELETE_QUEUE_ACK_*` khi có thêm bằng chứng |

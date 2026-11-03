@@ -1,9 +1,35 @@
-# Bàn giao dự án QTzalo — từ v0.1.2 sang bản tiếp theo
+# Bàn giao dự án QTzalo — từ v0.1.3 sang bản tiếp theo
 
 > Tài liệu này dành cho phiên làm việc (người hoặc AI) tiếp theo. Đọc hết trước khi sửa code.
-> Cập nhật lần cuối: 2026-11-02, khi phát hành v0.1.2. Mục 0 là phần mới; mục 1 trở đi giữ nội dung bàn giao của 0.1.1 và được sửa ở những chỗ đã thay đổi. Bản bàn giao trước xem lịch sử git của file này.
+> Cập nhật lần cuối: 2026-11-03, khi phát hành v0.1.3. Mục 0 là phần mới; mục 0a giữ tóm tắt của v0.1.2; mục 1 trở đi giữ nội dung bàn giao của 0.1.1 và được sửa ở những chỗ đã thay đổi. Bản bàn giao trước xem lịch sử git của file này.
 
-## 0. v0.1.2 (2026-11-02) — tóm tắt cho phiên sau
+## 0. v0.1.3 (2026-11-03) — tóm tắt cho phiên sau
+
+- **Phiên chạy trên PC Windows của người dùng**, với tài khoản Zalo thật và điện thoại thật.
+- **Phát hành:** nhánh `claude/v0.1.3` được fast-forward vào `main` (`daa4d6e`), đã push, nhánh cục bộ đã xoá. Release `v0.1.3` do workflow `ci-release.yml` build (run `41653890025`).
+- **Đã làm:**
+  - **Thả cảm xúc khi rê chuột:** nút tròn ngoài mép bong bóng (bấm = 👍); dừng chuột 250 ms thì bung thanh 6 cảm xúc; nút ✕ gỡ (`src/gui/messages.rs`: `hover_reaction_controls`, `advance_react_bar`, `menu_or_popup_open`).
+  - **Nhận reaction theo thời gian thực:** socket `612` lúc đang mở; queue `610_1`/`611_1` và `lp_control` để bù sau khi tắt máy (`src/reaction.rs`, `GuiEvent::ReactionsReceived`).
+  - **Đếm cộng dồn giống Zalo** (người dùng chọn): mỗi lần bấm là một mục; gỡ thì xoá hết các lần bấm của người đó.
+  - **Tin của chính mình được định danh bằng `cliMsgId`:** thêm trường `ChatMessage.cli_msg_id`; gửi `gMsgID` dạng số và `cMsgID = cliMsgId`.
+  - **Sửa `lp_control` bị 413:** chỉ gửi tối đa 10 id mới nhất của mỗi queue (`chat::newest_action_ids`).
+  - **Phần B:** B3.1 (bản đồ Zalo PC 26.10.20) và B3.2 (sự kiện transfer `user_confirm` / `transfer_error` / `syncmsg_info`) ở `re-notes/11_sync_v1.md`.
+- **Quy trình phiên này:** brainstorming → spec `docs/superpowers/specs/2026-11-02-reaction-hover-realtime-design.md` (có mục §0 ghi các sửa đổi sau nghiệm thu) → kế hoạch `docs/superpowers/plans/2026-11-02-reaction-hover-realtime.md` → làm theo TDD → một agent review toàn nhánh (0 Critical, 3 Important, đã sửa) → nghiệm thu thật.
+- **Kiểm chứng:**
+  - `cargo test --locked`: 225 qua, 1 bỏ qua.
+  - Build MSVC sạch; `cargo +1.88 check --locked --all-targets` sạch; `cargo audit`: 0 lỗ hổng, 2 cảnh báo hết bảo trì.
+  - Người dùng xác nhận reaction khớp hai chiều, cả với tin của người khác lẫn tin của chính mình ("Cloud của tôi"), và cách đếm cộng dồn khớp điện thoại.
+  - Bằng chứng: `re-notes/10` §17–19.
+- **Chưa kiểm chứng:** reaction trong nhóm từ QTzalo (`/api/group/reaction`; nhận reaction nhóm đã thấy trong trace); Linux/macOS; TUI.
+- **Phát hiện quan trọng:**
+  1. Reaction đến qua `612`, `610_1`/`611_1` và `lp_control`; máy chủ gửi lại cả reaction do chính client gửi.
+  2. Gỡ cảm xúc là `rIcon = ""`, `rType = -1`.
+  3. Với tin vừa gửi của chính mình, `gMsgID = 0` và tin được định danh bằng `cliMsgId`.
+  4. Zalo đếm mỗi lần bấm.
+  5. Trace chỉ in cấu trúc thì không thấy những lỗi phụ thuộc vào **giá trị** (`gMsgID = 0`, `cMsgID` sai). Phải thêm dòng chẩn đoán tạm, chỉ in id/mã, mới thấy.
+- **Việc tiếp theo:** Phần B bước B3.3 (định dạng `db-cross-v4`), xem `KE_HOACH_TIEP_THEO.md` §2 và `re-notes/11`. Tồn đọng của 0.1.3 ở §8.
+
+## 0a. v0.1.2 (2026-11-02) — giữ lại để tham chiếu
 
 - **Phiên này chạy trên PC Windows của người dùng**, với tài khoản Zalo thật và điện thoại thật.
 - **Nhánh `claude/v0.1.2`** được fast-forward vào `main`; Release `v0.1.2` do CI build.
@@ -77,6 +103,7 @@
 | Tin nhắn / API | `src/chat.rs` (lớn, khoảng 4,6k dòng) | `get_friends`, `get_groups` (`/api/group/getmg-v2`), `get_group_history`, upload ảnh/tệp, `parse_link_metadata(s, url, allow_direct_fetch)` |
 | WebSocket | `src/socket.rs` | chỉ dùng `wss://` của Zalo; giải nén giới hạn 32 MiB; `spawn_with_cursors` kéo queue từ con trỏ đã lưu (`WsCursors`) |
 | Đồng bộ (0.1.2) | `src/sync_state.rs` | `SyncState` (`sync_state_<uin>.json`), `merge_ws_queue_status`, `gap_signals`/`record_gaps_from` (bảng `missing_ranges`), `MsgIdClock` + `load_conversation_activity` (bảng `thread_activity`) |
+| Reaction (0.1.3) | `src/reaction.rs` | `MsgReaction` (một lần bấm; `emoji` rỗng = mốc gỡ), `extract_events` (`612/610/611/lp_control`, `gMsgID` hoặc `cliMsgId`), `apply`, `add_mine`/`remove_mine`, `summary`, `apply_to_threads`; gửi: `chat::reaction_content` + `send_reaction`; giao diện: `gui/messages.rs` (`hover_reaction_controls`) |
 | Trace (0.1.2) | `src/trace_shape.rs` | `ZCALL_WS_TRACE=1`: in cấu trúc payload, không in nội dung |
 | Video (0.1.2) | `src/video.rs`, `src/gui/media_view.rs` | tìm `ffmpeg.exe`, tham số đã khoá chặt, cửa sổ phát video; `WorkerCmd::PrepareVideo` tải vào `stickers_cache/videos/` |
 | Cuộc gọi | `src/call.rs`, `src/media.rs`, `src/voip_log.rs`, `src/audio.rs` | log chỉ ghi khi `--dev` / `ZALO_CALL_TRACE=1` / `ZALO_VOIP_LOG` |
@@ -85,7 +112,7 @@
 | GUI — worker nền | `src/gui/worker.rs` | `enum WorkerCmd`; mọi việc mạng chạy ở đây (tokio) |
 | GUI — bố cục | `src/gui/sidebar.rs` (thanh điều hướng + danh sách hội thoại), `src/gui/workspace.rs` (khung chat, composer), `src/gui/messages.rs` (bong bóng, thẻ link/ảnh/tệp, mở URL, file picker, clipboard), `src/gui/modals.rs` (Cài đặt 7 tab, trình xem ảnh, cuộc gọi…), `src/gui/stickers.rs`, `src/gui/theme.rs` (bảng màu, dò font), `src/gui/demo.rs` (dữ liệu mẫu offline) | |
 | TUI | `src/tui.rs`, `src/ui.rs` | |
-| Công cụ dev | `src/bin/*` | `call_probe`, `test_fetch`, … |
+| Công cụ dev | `src/bin/*`, `scripts/` | `call_probe`, `test_fetch`, …; `scripts/shot-demo.ps1` (chụp ảnh `--demo` trên Windows bằng PrintWindow); `scripts/re/asar_map.py`, `asar_snip.py` (đọc `app.asar` của Zalo PC, chỉ đọc, chạy bằng `python -I`) |
 
 ## 4. Build, test, kiểm chứng
 
@@ -110,13 +137,17 @@ cargo audit                                # đã cài sẵn trong môi trườn
 
 ## 5. Việc tiếp theo — xem `docs/dev/KE_HOACH_TIEP_THEO.md`
 
-Người dùng đã chọn hướng (2026-11-01): **v0.1.2 = tự bắt kịp tin nhắn khi mở app** (lưu con trỏ hàng đợi, kéo bù tới khi hết, báo khoảng thiếu, nối liền lịch sử nhóm/Cloud, nhận diện tin E2EE), sau đó **nghiên cứu "Đồng bộ từ điện thoại" theo hướng Sync V1**. Phiên tiếp theo chạy **trên PC Windows** của người dùng, có tài khoản Zalo thật.
+- v0.1.2 (tự bắt kịp tin khi mở app) và v0.1.3 (thả cảm xúc, reaction theo thời gian thực) đã phát hành.
+- Việc tiếp theo là **Phần B: "Đồng bộ từ điện thoại" theo hướng Sync V1**. B3.1 và B3.2 đã xong (`re-notes/11`); bước kế tiếp là **B3.3**, phân tích định dạng file sao lưu mà module native `db-cross-v4` (chỉ có bản ia32) giải mã.
+- Phiên tiếp theo chạy **trên PC Windows** của người dùng, có tài khoản Zalo thật.
 
 - Kế hoạch chi tiết, tiêu chí nghiệm thu, các bước nghiên cứu Sync V1 và cách dựng môi trường PC: `docs/dev/KE_HOACH_TIEP_THEO.md`.
 - Prompt dán vào phiên mới: `docs/dev/PROMPT_BAN_GIAO.md`.
 - Cơ sở nghiên cứu: `re-notes/09_dong_bo_tin_nhan.md` (bundle Zalo PC trong lịch sử git + tài liệu phân tích Zalo PC 26.10.20 do người dùng cung cấp, tài liệu này không có trong repo).
 
-## 6. Quy trình phát hành (đã chạy thành công cho v0.1.0 và v0.1.1)
+## 6. Quy trình phát hành (đã chạy thành công cho v0.1.0 → v0.1.3)
+
+> Trên PC của người dùng, `gh` đã đăng nhập: v0.1.3 phát hành bằng `git push origin main`, `gh workflow run ci-release.yml --ref main -f release=true`, chờ bằng `gh run watch <id> --exit-status` (chạy nền), kiểm tra bằng `gh release view v<x.y.z>`. Các bước GitHub MCP bên dưới dùng cho môi trường cloud.
 
 1. Sửa `Cargo.toml` thành `version = "<phiên bản mới>"`, chạy `cargo build` để `Cargo.lock` cập nhật dòng `ctdozlite`.
 2. `CHANGELOG.md`: thêm mục `## [x.y.z] - <ngày>` (Thêm mới / Sửa lỗi / Bảo mật) và link ở cuối file. Cập nhật `docs/SECURITY_AUDIT.md` nếu có thay đổi bảo mật.
@@ -159,6 +190,11 @@ Người dùng đã chọn hướng (2026-11-01): **v0.1.2 = tự bắt kịp ti
 - **(0.1.2)** Scratchpad dùng chung với agent: agent đã ghi đè script chụp ảnh của coordinator. Đặt tiền tố riêng cho từng agent (`a8_…`).
 - **(0.1.2)** Bỏ một giới hạn an toàn có thể làm lộ ra lỗi có sẵn. Bỏ giới hạn 3 đợt long-poll đã biến lỗi "không theo dõi queue 16" thành khoảng 10 yêu cầu/giây. Luôn có điều kiện "con trỏ phải tiến" khi lặp, và đếm số yêu cầu trong trace sau mỗi thay đổi vòng lặp.
 - **(0.1.2)** Agent bị dừng khi tiến trình cha thoát vẫn giữ nguyên worktree và transcript: `SendMessage` cho nó làm tiếp được, kể cả gộp nhánh coordinator vào.
+- **(0.1.3) Unit test dựng theo cấu trúc trace không bắt được lỗi phụ thuộc giá trị.** Hai lỗi thật (`cliMsgId` của tin của chính mình, cách đếm cộng dồn) chỉ lộ ra khi người dùng thử. Với tính năng tương tác hai chiều, nên sớm chạy một lượt có dòng chẩn đoán tạm (chỉ in id và mã, không in nội dung), và thử cả tin của mình lẫn tin của người khác, cả 1-1 lẫn Cloud.
+- **(0.1.3) egui 0.29:** menu chuột phải **không** nằm trong `memory.popup`, nên `any_popup_open()` không bắt được; phải kiểm `egui::menu::BarState::load(ctx, Id::new("__egui::context_menu"))`. Panel nằm trên lớp nền được đăng ký phủ cả màn hình, nên `ctx.layer_id_at(p)` dùng được để biết con trỏ có đang ở trên một popup không.
+- **(0.1.3)** Trên PC, `gh` dùng được cho Actions và Release. Chờ CI bằng một lệnh `gh run watch` chạy nền, không cần hẹn giờ kiểm tra lại.
+- **(0.1.3)** Chụp ảnh giao diện trên Windows: `scripts/shot-demo.ps1` (PrintWindow cờ 2 chụp được cửa sổ glow kể cả khi bị che). Màn hình 150 % nên ảnh ra 1920×1200 với `QTZALO_DEMO_SIZE=1280x800`.
+- **(0.1.3)** Sắp chạm giới hạn sử dụng thì dừng agent đang chạy nền (`TaskStop`), nếu không nó tiêu hết phần còn lại mà vẫn có thể không kịp báo cáo.
 - **(0.1.1) Mẫu chia việc hiệu quả:** coordinator tự viết toàn bộ backend + biến thể enum + xử lý sự kiện trong `gui.rs`, agent chỉ làm UI theo vùng file (messages/modals-viewer vs modals-settings vs chat/deps). Chỉ có 1 xung đột nhỏ ở khối biến demo trong `src/gui.rs`.
 
 ## 8. Tồn đọng đã biết
@@ -173,3 +209,15 @@ Người dùng đã chọn hướng (2026-11-01): **v0.1.2 = tự bắt kịp ti
 - **Tải về:** chưa có nút huỷ; macOS chưa gắn quarantine; dark theme nút đỏ (`pal.danger`) chữ trắng tương phản hơi thấp.
 - **Emoji màu:** egui không vẽ được emoji màu.
 - **Bộ cài chưa ký số**, nên SmartScreen cảnh báo.
+- **(0.1.3) Reaction:**
+  - Tin cũ do chính mình gửi trong hội thoại 1-1 (lưu trước 0.1.3) chưa có `cliMsgId`, nên reaction từ điện thoại lên những tin đó không khớp. QTzalo không tải lại lịch sử 1-1 để bổ sung trường này.
+  - Reaction cho tin nằm ngoài 200 tin gần nhất trong bộ nhớ của mỗi hội thoại bị bỏ qua.
+  - Gửi lỗi thì không hoàn tác trên máy.
+  - TUI không nhận reaction theo thời gian thực.
+  - Mã cảm xúc lạ (ngoài 6 mã) hiện thành ❤️.
+- **(0.1.3) Các điểm nhỏ còn để lại sau review:**
+  - phần xử lý rê chuột chạy cho mọi bong bóng đang tải ở mỗi khung hình, và tính phần tóm tắt reaction ba lần;
+  - tin đã thu hồi vẫn có nút cảm xúc;
+  - thiếu test cho `content` dạng object, `gMsgID` dạng chuỗi, `uidFrom` dạng số;
+  - quay lại 0.1.2 thì cache hội thoại bị bỏ (đã ghi trong release notes).
+- **(0.1.3)** `msgType` trong `rMsg` mới ánh xạ ảnh = 32 (đã quan sát); nhãn dán vẫn gửi 5, tệp/video/voice gửi 1 (theo zca-js có lẽ là 36/46/44/31, chưa kiểm chứng).
