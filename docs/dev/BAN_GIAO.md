@@ -146,19 +146,32 @@ thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.m
     payload (nghi luồng nén) — còn [U]; `0x29680` là dead code (0 xref).
   - Test: **269 pass / 1 ignored**; `cargo check --all-targets` 0 warning; MSRV 1.88 sạch;
     `cargo audit` 0 lỗ hổng (2 unmaintained).
+- **Đã sửa vòng 6 (Đợt 3 — đóng nốt [U] + module Rust đầu tiên của Phần B):**
+  - **`re-notes/15` đóng 2 điểm [U]:** MD5 băm **luồng nén** (không phải luồng đã giải nén; bằng chứng
+    `MD5Update` @`0x28B41` băm buffer ghép block `[esp+34Ch]`, chính là input của decode `0x33B80`);
+    **mỗi chunk 64 KiB dùng IV 0 riêng** (vùng IV `[ebp-0x30]` chỉ zero-hoá + đọc 1 lần/vòng; CBC chỉ
+    nối trong chunk); padding chỉ **căn khối** để cấp buffer, không bóc PKCS#7 (`0x26B50`).
+  - **Module mới `src/sync_v1/format.rs`** (7 test): `xxh32` (vector chuẩn từ `python-xxhash`),
+    `parse_header` (magic `ZDB4.0`, độ dài header, XXH32, bảng `nfile`, giới hạn 0x80/2e9),
+    `derive_key` (password zero-pad 32 B), `decrypt_cbc_blocks` (không bóc padding) +
+    `decrypt_cbc_pkcs7` (dự phòng), `decrypt_with_password`; vector AES-256-CBC NIST SP 800-38A đã
+    **đối chiếu bằng `openssl enc`** trên máy. **Chưa nối vào client**, chưa có XZ.
+  - Test: **276 pass / 1 ignored**; `cargo check --all-targets` 0 warning; MSRV 1.88 sạch;
+    `cargo audit` 0 lỗ hổng (2 unmaintained).
 - **Tồn đọng còn lại (ưu tiên giảm dần):**
   1. Chưa ACK hàng đợi (`DELETE_QUEUE_ACK_*`) — cần bằng chứng thật, ACK sai mất tin.
   2. Chưa có retention cho `messages`/`raw_json` (chỉ nén, không xoá — đúng ý người dùng).
-  3. **Phần B:** còn [U] MD5 băm luồng nén hay đã giải nén và IV khi file >64 KiB; chưa có
-     `pull_mobile_msg`/RSA/tải/giải mã. Cần **một file backup thật** để xác nhận KDF trước khi viết code.
+  3. **Phần B:** format đã chốt, nhưng còn [U] framing payload từng file, đuôi header, vị trí + cách
+     de-obfuscate 32 hex MD5 khi đọc lại, tham số liblzma, và lớp **XOR 16 byte của V1**; chưa có
+     `pull_mobile_msg`/RSA/tải/giải mã. Cần **một file backup thật** để xác nhận KDF trước khi hoàn
+     thiện `decrypt()`.
   4. TUI: chưa có cuộc gọi, chưa hiện "đang nhập"; nav "Khác"/"Trò chuyện ẩn"/zCloud vẫn "sắp có".
   5. Cần smoke-test tài khoản thật cho: xoá/thu hồi bằng `cliMsgId`, `typing`, reaction trong nhóm.
-- **Việc tiếp theo (Phần B, còn rất gần):** (1) đọc `0x286E0–0x28A40` để chốt MD5 băm luồng nén hay
-  đã giải nén; (2) đọc vòng CBC `0x26BD0–0x26C0F` để chốt IV khi file >64 KiB; (3) có **một file backup
-  thật** (cần người dùng đồng ý chạy "Đồng bộ từ điện thoại" trên Zalo PC chính thức) rồi thử
-  `password[..32]` + AES-256-CBC IV 0 → nếu 6 byte đầu ra `"ZDB4.0"` là xác nhận KDF; thử thêm
-  `hex::decode(privateKey)`, `md5(password)`, `to_uppercase()`. Khi xác nhận xong mới viết
-  `sync_v1/decrypt.rs` bằng Rust (XZ dùng crate `xz2`/`lzma-rs`).
+- **Việc tiếp theo (Phần B):** (1) đọc framing payload từng file + đuôi header (`0x1AE00` sau entries)
+  và lớp XOR 16 byte của V1; (2) có **một file backup thật** (cần người dùng đồng ý chạy "Đồng bộ từ
+  điện thoại" trên Zalo PC chính thức) rồi thử `password[..32]` + AES-256-CBC IV 0 → nếu 6 byte đầu ra
+  `"ZDB4.0"` là xác nhận KDF; (3) sau đó mới thêm XZ (`xz2`/`lzma-rs`) và nối `sync_v1` vào luồng
+  phục hồi. Trước khi có (2), **không** gọi `pull_mobile_msg` (hành động thật trên tài khoản).
 - **Bài học phiên này (bổ sung 2):** công cụ có sẵn trong toolchain đôi khi đủ mạnh — `dumpbin` của
   VS Build Tools thay được Ghidra cho việc đọc hàm theo địa chỉ. Khi dumpbin cắt cột byte ở 6 byte,
   phải suy độ dài lệnh từ **địa chỉ dòng kế tiếp**, nếu không sẽ lệch và bỏ sót lệnh (đã làm hỏng

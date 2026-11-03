@@ -12,11 +12,13 @@
 > không xoá), chặn id `out_*`/`local_*` khi xoá/thu hồi, `threads_cache.json` ghi toàn bộ mỗi vòng,
 > TUI chưa có cuộc gọi/reaction realtime.
 > **Đợt 3 (Phần B):** B3.3 đã **chốt định dạng** (`re-notes/15`): header `ZDB4.0` + XXH32 + danh sách
-> file, KDF = password zero-pad 32 byte (không băm), AES-256-CBC IV 0 PKCS#7, thứ tự giải mã→header→
-> giải nén XZ; còn [U] MD5 payload và IV nhiều chunk. Phía mã đã có bộ đọc sự kiện transfer
-> (`call::extract_transfer_events`, log cấu trúc khi `--dev`) và TUI đã nhận cảm xúc realtime.
-> Bước còn lại trước khi viết Rust: cần **một file backup thật** (người dùng đồng ý chạy "Đồng bộ từ
-> điện thoại") để xác nhận KDF, rồi mới viết `sync_v1/decrypt.rs`.
+> file, KDF = password zero-pad 32 byte (không băm), AES-256-CBC **IV 0 cho từng chunk 64 KiB**, padding
+> chỉ căn khối (không bóc), MD5 băm **luồng nén**, thứ tự giải mã→header→giải nén XZ. Phía mã đã có
+> **module `src/sync_v1/format.rs`** (XXH32 có vector chuẩn, `parse_header`, `derive_key`,
+> `decrypt_cbc_*` với vector NIST SP 800-38A) — **chưa nối** vào client và **chưa có XZ**.
+> Bước còn lại: cần **một file backup thật** (người dùng đồng ý chạy "Đồng bộ từ điện thoại") để xác
+> nhận KDF/đóng gói payload, và đọc nốt framing payload + lớp XOR của V1; sau đó mới viết `decrypt()`
+> hoàn chỉnh (XZ dùng `xz2`/`lzma-rs`).
 > **Cập nhật 2026-11-03:**
 > - v0.1.3 đã phát hành: thả cảm xúc khi rê chuột, reaction theo thời gian thực, đếm cộng dồn giống Zalo (`CHANGELOG.md`, `re-notes/10` §17–19). Việc này nằm ngoài kế hoạch: người dùng yêu cầu.
 > - **Phần B đang làm:** B3.1 và B3.2 đã xong (`re-notes/11_sync_v1.md`). **Việc tiếp theo là B3.3.** Script đọc `app.asar`: `scripts/re/asar_map.py`, `scripts/re/asar_snip.py`.

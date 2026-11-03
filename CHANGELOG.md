@@ -74,7 +74,13 @@ và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, ch
   ≤64 MiB) và nén CSDL lịch sử (WAL checkpoint + VACUUM) ngay, không cần khởi động lại, không xoá tin.
 - **Xoá/thu hồi dùng `cliMsgId` thật của tin** (trước luôn gửi `ts` ms, và gửi `now` khi thiếu `ts`);
   nếu tin không có cả `cliMsgId` lẫn thời điểm gửi thì từ chối với lỗi tiếng Việt thay vì gửi id bịa.
-- **Test:** 225 → **269** test qua (1 bỏ qua).
+- **Phần B — module `sync_v1`:** `src/sync_v1/format.rs` cài đặt định dạng `db-cross-v4` đã chốt bằng
+  disassembly: `XXH32` (có vector kiểm chuẩn), `parse_header` (magic `ZDB4.0`, độ dài header, bảng
+  `nfile` tệp, giới hạn tên 0x80 byte/kích thước 2e9), `derive_key` (password zero-pad 32 byte),
+  `decrypt_cbc_blocks`/`decrypt_cbc_pkcs7` (AES-256-CBC, IV 0, có vector NIST SP 800-38A).
+  **Chưa nối vào client** và **chưa có phần giải nén XZ**: cần một file backup thật để xác nhận KDF
+  và cách đóng gói payload (`re-notes/15` §8).
+- **Test:** 225 → **276** test qua (1 bỏ qua).
 
 ### Sửa lỗi
 
@@ -113,8 +119,9 @@ và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, ch
   `db-cross-v4`), `re-notes/14_db_cross_v4_disasm.md` (disassemble bằng `dumpbin`: sửa địa chỉ
   4 hàm N-API, chốt magic header **`ZDB4.0`** big-endian, **AES-256 + PKCS#7**, **liblzma/XZ**) và
   `re-notes/15_db_cross_v4_decrypt.md` (**chốt định dạng**: layout header byte, hash header **XXH32**,
-  **KDF = password zero-pad 32 byte**, **AES-256-CBC IV 0**, thứ tự **giải mã → parse header → giải nén**,
-  kèm pseudocode Rust; MD5 payload và IV nhiều chunk còn **[U]**).
+  **KDF = password zero-pad 32 byte**, **AES-256-CBC IV 0**, **giải mã → parse header → giải nén**;
+  MD5 băm **luồng nén** và mỗi chunk 64 KiB dùng **IV 0 riêng**; padding chỉ để căn khối, không bóc;
+  kèm pseudocode Rust).
 
 ## [0.1.3] - 2026-11-03
 
