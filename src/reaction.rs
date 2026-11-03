@@ -67,6 +67,9 @@ pub struct ReactionEvent {
     pub emoji: String,
     /// Server timestamp of the event (ms).
     pub ts: i64,
+    /// `cMsgID` of the target. It names the message when `gMsgID` is 0 (a reaction to one's own
+    /// message, `re-notes/10` §19).
+    pub cli_msg_id: String,
 }
 
 /// What the reaction chip shows.
@@ -166,8 +169,13 @@ pub fn extract_events(payload: &Value, self_uid: &str, cloud_id: Option<&str>) -
             let uid = if is_self(&uid_from) { "0".to_string() } else { uid_from.clone() };
             let targets = content.get("rMsg").and_then(Value::as_array).cloned().unwrap_or_default();
             for target in &targets {
-                let msg_id = str_or_num(target.get("gMsgID"));
-                if msg_id.is_empty() || msg_id == "0" {
+                let mut msg_id = str_or_num(target.get("gMsgID"));
+                let cli_msg_id = str_or_num(target.get("cMsgID"));
+                if msg_id == "0" {
+                    msg_id.clear();
+                }
+                // `gMsgID` 0: a reaction to one's own message, named by its `cliMsgId` only.
+                if msg_id.is_empty() && (cli_msg_id.is_empty() || cli_msg_id == "0") {
                     continue;
                 }
                 out.push(ReactionEvent {
@@ -177,6 +185,7 @@ pub fn extract_events(payload: &Value, self_uid: &str, cloud_id: Option<&str>) -
                     uid: uid.clone(),
                     emoji: emoji.clone(),
                     ts,
+                    cli_msg_id,
                 });
             }
         }
@@ -215,7 +224,15 @@ pub fn apply_to_threads(threads: &mut [crate::chat::Thread], events: &[ReactionE
         let Some(t) = threads.iter_mut().find(|t| t.id == ev.thread_id) else {
             continue;
         };
-        if let Some(m) = t.messages.iter_mut().find(|m| m.id == ev.msg_id) {
+        // By `gMsgID` when the event has one, else by `cliMsgId` (own messages).
+        let target = |m: &&mut crate::chat::ChatMessage| {
+            if ev.msg_id.is_empty() {
+                !ev.cli_msg_id.is_empty() && m.cli_msg_id.as_deref() == Some(ev.cli_msg_id.as_str())
+            } else {
+                m.id == ev.msg_id
+            }
+        };
+        if let Some(m) = t.messages.iter_mut().find(target) {
             changed |= apply(&mut m.reactions, ev);
         }
     }
@@ -312,7 +329,39 @@ mod tests {
             uid: uid.into(),
             emoji: emoji.into(),
             ts,
+            cli_msg_id: "1".into(),
         }
+    }
+
+    #[test]
+    fn own_message_reaction_is_identified_by_cli_msg_id() {
+        // [O] 03/11: the phone reacting to a photo it sent itself uses gMsgID 0 and the photo's
+        // cliMsgId (`re-notes/10` §19).
+        let content = json!({
+            "rType": 0, "rIcon": ":>", "msgSender": "130655484", "source": 0,
+            "rMsg": [{ "cMsgID": 1793705979715_u64, "gMsgID": 0, "msgType": 32 }]
+        })
+        .to_string();
+        let p = push_612(
+            vec![json!({ "uidFrom": "0", "idTo": "222", "ts": "1793713381878", "content": content })],
+            vec![],
+        );
+        let evs = extract_events(&p, SELF_UID, CLOUD);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].msg_id, "");
+        assert_eq!(evs[0].cli_msg_id, "1793705979715");
+        assert_eq!(evs[0].thread_id, "222");
+    }
+
+    #[test]
+    fn apply_to_threads_matches_own_message_by_cli_msg_id() {
+        let mut t = thread_with("222", "8447783931887");
+        t.messages[0].cli_msg_id = Some("1793705979715".into());
+        let mut threads = vec![t];
+        let mut e = ev("222", false, "", "0", "😆", 5);
+        e.cli_msg_id = "1793705979715".into();
+        assert!(apply_to_threads(&mut threads, &[e]));
+        assert_eq!(threads[0].messages[0].reactions.len(), 1);
     }
 
     #[test]
@@ -357,7 +406,14 @@ mod tests {
     fn skips_items_without_target_or_ts() {
         let mut no_ts = item("222", "0", 0, "/-heart", &[7005]);
         no_ts.as_object_mut().unwrap().remove("ts");
-        let p = push_612(vec![item("222", "0", 10, "/-heart", &[0]), no_ts], vec![]);
+        // gMsgID 0 is a valid target only with a cMsgID (own messages); here both are 0.
+        let mut no_target = item("222", "0", 10, "/-heart", &[0]);
+        no_target["content"] = json!(json!({
+            "rIcon": "/-heart", "rType": 5,
+            "rMsg": [{ "gMsgID": 0, "cMsgID": 0, "msgType": 1 }]
+        })
+        .to_string());
+        let p = push_612(vec![no_target, no_ts], vec![]);
         assert!(extract_events(&p, SELF_UID, CLOUD).is_empty());
     }
 

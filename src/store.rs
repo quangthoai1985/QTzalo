@@ -410,6 +410,7 @@ impl MessageStore {
                 let mut reply_to_sender = None;
                 let mut reply_to_text = None;
                 let mut reactions = Vec::new();
+                let mut cli_msg_id = None;
                 let mut is_pinned = false;
                 let mut is_starred = false;
                 let mut link_url = None;
@@ -447,6 +448,7 @@ impl MessageStore {
                         if let Some(arr) = val.get("reactions").filter(|v| v.is_array()) {
                             reactions = serde_json::from_value(arr.clone()).unwrap_or_default();
                         }
+                        cli_msg_id = val.get("cliMsgId").and_then(|v| v.as_str()).map(str::to_string);
                         is_pinned = val
                             .get("is_pinned")
                             .and_then(|v| v.as_bool())
@@ -495,6 +497,7 @@ impl MessageStore {
                     reply_to_sender,
                     reply_to_text,
                     reactions,
+                    cli_msg_id,
                     is_pinned,
                     is_starred,
                     link_url,
@@ -531,6 +534,9 @@ impl MessageStore {
                     }
                     if existing.reactions.is_empty() && !cm.reactions.is_empty() {
                         existing.reactions = cm.reactions;
+                    }
+                    if existing.cli_msg_id.is_none() {
+                        existing.cli_msg_id = cm.cli_msg_id;
                     }
                     existing.is_pinned = existing.is_pinned || cm.is_pinned;
                     existing.is_starred = existing.is_starred || cm.is_starred;
@@ -578,6 +584,9 @@ impl From<&ChatMessage> for StoredMessage {
         }
         if !m.reactions.is_empty() {
             meta.insert("reactions".into(), serde_json::json!(m.reactions));
+        }
+        if let Some(cli) = &m.cli_msg_id {
+            meta.insert("cliMsgId".into(), serde_json::json!(cli));
         }
         if m.is_pinned {
             meta.insert("is_pinned".into(), serde_json::json!(true));
@@ -813,6 +822,7 @@ mod tests {
                 text: "Hello".into(),
                 ts: 1000,
                 reactions: reactions.clone(),
+                cli_msg_id: Some("1793705979715".into()),
                 ..Default::default()
             }],
         };
@@ -846,6 +856,8 @@ mod tests {
             hydrated.iter().find(|t| t.id == tid).unwrap().messages[0].reactions.clone()
         };
         assert_eq!(find("t_r"), reactions);
+        let cli = hydrated.iter().find(|t| t.id == "t_r").unwrap().messages[0].cli_msg_id.clone();
+        assert_eq!(cli.as_deref(), Some("1793705979715"));
         assert_eq!(
             find("t_old"),
             vec![MsgReaction { uid: String::new(), emoji: "❤️".into(), ts: 0 }]

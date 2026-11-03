@@ -29,6 +29,10 @@ pub struct ChatMessage {
     pub reply_to_text: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<crate::reaction::MsgReaction>,
+    /// `cliMsgId` from the server. Reactions to a message its own sender reacts to name it by
+    /// this id (`gMsgID` is 0 then, `re-notes/10` §19).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_msg_id: Option<String>,
     #[serde(default)]
     pub is_pinned: bool,
     #[serde(default)]
@@ -231,6 +235,9 @@ pub fn merge_thread_into(
             }
             if existing_msg.reactions.is_empty() && !msg.reactions.is_empty() {
                 existing_msg.reactions = msg.reactions;
+            }
+            if existing_msg.cli_msg_id.is_none() {
+                existing_msg.cli_msg_id = msg.cli_msg_id;
             }
             existing_msg.is_pinned = existing_msg.is_pinned || msg.is_pinned;
             existing_msg.is_starred = existing_msg.is_starred || msg.is_starred;
@@ -2391,6 +2398,37 @@ pub fn reaction_code_and_type(emoji_or_code: &str) -> (&'static str, i32) {
     }
 }
 
+/// The `message` JSON of one reaction (`rMsg` names the target message).
+pub fn reaction_content(msg: &ChatMessage, reaction: &str) -> Value {
+    let (r_icon, r_type) = reaction_code_and_type(reaction);
+    // Like the phone: `gMsgID` is a number (0 when unknown), `cMsgID` the message's own
+    // `cliMsgId`, which is how the sender's devices find their own messages (`re-notes/10` §19).
+    let is_local_id = msg.id.is_empty() || msg.id.starts_with("out_") || msg.id.starts_with("local_");
+    let g_msg_id: u64 = if is_local_id { 0 } else { msg.id.parse().unwrap_or(0) };
+    let c_msg_id: u64 = msg
+        .cli_msg_id
+        .as_deref()
+        .and_then(|c| c.parse().ok())
+        .or_else(|| (msg.ts > 0).then_some(msg.ts as u64))
+        .unwrap_or(g_msg_id);
+    let is_photo = msg.link_src.as_deref() == Some("Hình ảnh Zalo")
+        || msg.text.trim() == "[Hình ảnh]"
+        || msg.text.trim().starts_with("[Hình ảnh] ");
+    let msg_type = if msg.sticker_id.is_some() {
+        5
+    } else if is_photo {
+        32
+    } else {
+        1
+    };
+    json!({
+        "rMsg": [{ "gMsgID": g_msg_id, "cMsgID": c_msg_id, "msgType": msg_type }],
+        "rIcon": r_icon,
+        "rType": r_type,
+        "source": 6
+    })
+}
+
 /// Send a message reaction (`sendReactionMessage` in `compact-app-pc.b7bec208c4c8f73e09f8.js:14317097`, cmd `12410` / `12411`).
 pub async fn send_reaction(
     s: &Session,
@@ -2407,32 +2445,7 @@ pub async fn send_reaction(
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    let (r_icon, r_type) = reaction_code_and_type(reaction);
-    let is_local_id = msg.id.is_empty()
-        || msg.id.starts_with("out_")
-        || msg.id.starts_with("local_");
-    let g_msg_id_val = if is_local_id {
-        json!("")
-    } else {
-        json!(msg.id)
-    };
-    let c_msg_id = if msg.ts > 0 {
-        msg.ts as u64
-    } else {
-        msg.id.parse::<u64>().unwrap_or(now)
-    };
-
-    let inner_msg = json!({
-        "rMsg": [{
-            "gMsgID": g_msg_id_val,
-            "cMsgID": c_msg_id,
-            "msgType": if msg.sticker_id.is_some() { 5 } else { 1 }
-        }],
-        "rIcon": r_icon,
-        "rType": r_type,
-        "source": 6
-    })
-    .to_string();
+    let inner_msg = reaction_content(msg, reaction).to_string();
 
     let react_list = json!([{
         "message": inner_msg,
@@ -4231,6 +4244,14 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         reply_to_sender,
         reply_to_text,
         reactions: extract_reactions(it),
+        cli_msg_id: it
+            .get("cliMsgId")
+            .and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .filter(|s| !s.is_empty() && s != "0"),
         is_pinned: false,
         is_starred: false,
         link_url,
@@ -4494,6 +4515,9 @@ pub fn merge_previews(threads: &mut Vec<Thread>, resp: &Value) {
                     // History reactions have no reactor: never let them replace per-person ones.
                     if existing.reactions.is_empty() && !parsed.reactions.is_empty() {
                         existing.reactions = parsed.reactions;
+                    }
+                    if existing.cli_msg_id.is_none() {
+                        existing.cli_msg_id = parsed.cli_msg_id;
                     }
                     existing.is_pinned = existing.is_pinned || parsed.is_pinned;
                     existing.is_starred = existing.is_starred || parsed.is_starred;
@@ -4892,6 +4916,45 @@ pub async fn find_user_by_phone(s: &Session, raw_phone: &str) -> Result<PhoneLoo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parsed_message_keeps_cli_msg_id() {
+        let v = json!({
+            "msgId": "8447783931887", "cliMsgId": "1793705979715", "msgType": "webchat",
+            "content": "hi", "uidFrom": "0", "idTo": "222", "ts": "1793705979842"
+        });
+        assert_eq!(parse_chat_message(&v).unwrap().cli_msg_id.as_deref(), Some("1793705979715"));
+    }
+
+    #[test]
+    fn reaction_content_targets_own_photo_like_the_phone() {
+        // [O] 03/11: the phone names its own photo by cliMsgId, gMsgID as a number, msgType 32.
+        let msg = ChatMessage {
+            id: "8447783931887".into(),
+            cli_msg_id: Some("1793705979715".into()),
+            ts: 1793705979842,
+            text: "[Hình ảnh]".into(),
+            link_src: Some("Hình ảnh Zalo".into()),
+            ..Default::default()
+        };
+        let c = reaction_content(&msg, "😆");
+        assert_eq!(c["rMsg"][0]["gMsgID"], json!(8447783931887_u64));
+        assert_eq!(c["rMsg"][0]["cMsgID"], json!(1793705979715_u64));
+        assert_eq!(c["rMsg"][0]["msgType"], json!(32));
+        assert_eq!(c["rIcon"], json!(":>"));
+        assert_eq!(c["rType"], json!(0));
+    }
+
+    #[test]
+    fn reaction_content_falls_back_to_ts_without_cli_msg_id() {
+        let msg = ChatMessage { id: "8447785000302".into(), ts: 1793705997326, text: "x".into(), ..Default::default() };
+        let c = reaction_content(&msg, "❤️");
+        assert_eq!(c["rMsg"][0]["cMsgID"], json!(1793705997326_u64));
+        assert_eq!(c["rMsg"][0]["gMsgID"], json!(8447785000302_u64));
+        assert_eq!(c["rMsg"][0]["msgType"], json!(1));
+        let local = ChatMessage { id: "out_1".into(), ts: 5, ..Default::default() };
+        assert_eq!(reaction_content(&local, "❤️")["rMsg"][0]["gMsgID"], json!(0));
+    }
 
     #[test]
     fn reaction_code_for_removal() {
