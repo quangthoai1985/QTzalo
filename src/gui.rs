@@ -154,6 +154,10 @@ pub enum GuiEvent {
         url: String,
         error: String,
     },
+    /// User pressed "Huỷ" on an in-flight attachment download (`WorkerCmd::CancelDownload`).
+    DownloadCancelled {
+        url: String,
+    },
     /// Size in bytes of `paths::cache_dir()`.
     CacheSizeComputed(u64),
     ImageCacheCleared {
@@ -174,6 +178,10 @@ pub enum GuiEvent {
         url: String,
         error: String,
     },
+    /// User pressed "Huỷ" while a chat video was being fetched for playback.
+    VideoCancelled {
+        url: String,
+    },
     /// Offline catch-up: messages fetched so far by the current catch-up, `done` at the end.
     SyncProgress {
         fetched: usize,
@@ -191,6 +199,8 @@ pub(crate) enum DownloadState {
     InProgress { received: u64, total: Option<u64> },
     Done(std::path::PathBuf),
     Failed(String),
+    /// Aborted by the user (`WorkerCmd::CancelDownload`); the card offers "Tải lại".
+    Cancelled,
 }
 
 impl DownloadState {
@@ -1043,6 +1053,10 @@ impl ZaloGuiApp {
                     self.show_toast(format!("Tải về thất bại: {error}"));
                     self.downloads.insert(url, DownloadState::Failed(error));
                 }
+                GuiEvent::DownloadCancelled { url } => {
+                    self.show_toast("Đã huỷ tải.");
+                    self.downloads.insert(url, DownloadState::Cancelled);
+                }
                 GuiEvent::CacheSizeComputed(bytes) => {
                     self.cache_size = Some(bytes);
                     self.cache_size_loading = false;
@@ -1072,6 +1086,10 @@ impl ZaloGuiApp {
                 } => self.on_video_progress(url, received, total),
                 GuiEvent::VideoReady { url, path } => self.on_video_ready(url, path),
                 GuiEvent::VideoFailed { url, error } => self.on_video_failed(url, error),
+                GuiEvent::VideoCancelled { url } => {
+                    self.show_toast("Đã huỷ tải video.");
+                    self.on_video_cancelled(url);
+                }
                 GuiEvent::SyncProgress { fetched, done } => {
                     self.sync_progress = Some((fetched, done, std::time::Instant::now()));
                 }
@@ -1391,7 +1409,8 @@ impl ZaloGuiApp {
                     if self.input_message.is_empty() && !text.is_empty() {
                         self.input_message = text;
                     }
-                    self.status_msg = format!("Không gửi được: {error}");
+                    // A failed send is the one status the user must not miss: toast it as well.
+                    self.show_toast(format!("Không gửi được: {error}"));
                 }
                 GuiEvent::CallStateChanged(state) => {
                     if state == "free" {
@@ -1565,6 +1584,27 @@ impl eframe::App for ZaloGuiApp {
                         DevTab::Scanner => self.render_dev_scanner(ui),
                         DevTab::CryptoState => self.render_dev_crypto(ui),
                     }
+                });
+        }
+
+        // Bottom status bar: the one place `status_msg` is rendered. Every worker reply (send
+        // failures, refresh problems, call errors) lands here instead of disappearing silently.
+        if self.is_logged_in && !self.status_msg.is_empty() {
+            egui::TopBottomPanel::bottom("status_bar")
+                .exact_height(22.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(pal.bg_elevated)
+                        .inner_margin(Margin::symmetric(12.0, 3.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(&self.status_msg)
+                                .size(11.0)
+                                .color(pal.text_secondary),
+                        );
+                    });
                 });
         }
 

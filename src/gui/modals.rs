@@ -3203,6 +3203,11 @@ fn image_viewer_toolbar(
                         pal.danger,
                         format!("Tải về thất bại: {e}"),
                     ),
+                    Some(DownloadState::Cancelled) => (
+                        format!("{ICON_RETRY} Tải lại"),
+                        pal.warning,
+                        "Đã huỷ tải ảnh — bấm để tải lại".to_string(),
+                    ),
                 };
                 let busy = matches!(dl_state, Some(DownloadState::InProgress { .. }));
                 let fill = if dl_state.is_none() { pal.primary } else { pal.bg_elevated };

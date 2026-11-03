@@ -1110,6 +1110,7 @@ pub(super) fn render_message_body(
                             accent: Color32::WHITE,
                             ok: Color32::from_rgb(134, 239, 172),
                             err: Color32::from_rgb(252, 165, 165),
+                            warn: Color32::from_rgb(253, 230, 138),
                             btn_bg: Color32::from_rgba_unmultiplied(15, 23, 42, 190),
                             btn_hover: Color32::from_rgba_unmultiplied(15, 23, 42, 235),
                         };
@@ -1298,7 +1299,10 @@ pub(super) fn render_message_body(
             dl_target.as_ref().and_then(|target| match dl_state {
                 Some(DownloadState::InProgress { .. }) => None,
                 Some(DownloadState::Done(path)) => Some(BubbleAction::OpenDownloaded(path.clone())),
-                None | Some(DownloadState::Failed(_)) => Some(BubbleAction::DownloadAndOpen {
+                // A cancelled / failed download is retried from scratch and opened when done.
+                None
+                | Some(DownloadState::Failed(_))
+                | Some(DownloadState::Cancelled) => Some(BubbleAction::DownloadAndOpen {
                     url: target.0.clone(),
                     suggested_name: target.1.clone(),
                 }),
@@ -2618,6 +2622,7 @@ fn render_video_thumb_card(
                 accent: Color32::WHITE,
                 ok: Color32::from_rgb(134, 239, 172),
                 err: Color32::from_rgb(252, 165, 165),
+                warn: Color32::from_rgb(253, 230, 138),
                 btn_bg: Color32::from_rgba_unmultiplied(15, 23, 42, 190),
                 btn_hover: Color32::from_rgba_unmultiplied(15, 23, 42, 235),
             };
@@ -2734,6 +2739,8 @@ struct DlColors {
     accent: Color32,
     ok: Color32,
     err: Color32,
+    /// Softer warning tint for the "Đã huỷ" state (never as loud as `err`).
+    warn: Color32,
     btn_bg: Color32,
     btn_hover: Color32,
 }
@@ -2746,6 +2753,8 @@ fn dl_colors(pal: &ThemePalette, outgoing: bool) -> DlColors {
             accent: Color32::WHITE,
             ok: Color32::WHITE,
             err: Color32::WHITE,
+            // Readable on the solid blue bubble without competing with the white text.
+            warn: Color32::from_rgb(255, 224, 153),
             btn_bg: Color32::from_rgba_unmultiplied(255, 255, 255, 40),
             btn_hover: Color32::from_rgba_unmultiplied(255, 255, 255, 72),
         }
@@ -2756,14 +2765,37 @@ fn dl_colors(pal: &ThemePalette, outgoing: bool) -> DlColors {
             track: pal.border,
             ok: pal.accent_online,
             err: pal.danger,
+            warn: pal.warning,
             btn_bg: pal.bg_hover,
             btn_hover: pal.bg_selected,
         }
     }
 }
 
-/// Round action button for an attachment card: download / progress ring / open / retry.
-/// Returns the action for a click (none while the download is running).
+/// Ask the worker to stop an in-flight download of `url` (`WorkerCmd::CancelDownload`).
+///
+/// The worker keeps one [`crate::download::CancelFlag`] per URL; it stops at the next chunk,
+/// deletes the `.part` file and answers `GuiEvent::DownloadCancelled` (or `VideoCancelled` when
+/// the URL is a video being prepared for playback). The GUI then shows `DownloadState::Cancelled`
+/// with a "Tải lại" button. Without a worker (`--demo`) there is nothing to stop.
+fn cancel_download(url: &str) {
+    if let Some(tx) = WORKER_TX.get() {
+        let _ = tx.send(WorkerCmd::CancelDownload {
+            url: url.to_string(),
+        });
+    }
+}
+
+/// `true` when a "Huỷ" click can reach a background worker (offline demo has none).
+fn download_cancel_available() -> bool {
+    !is_demo_mode() && WORKER_TX.get().is_some()
+}
+
+/// Round action button for an attachment card: download / progress (+ cancel) / open / retry.
+///
+/// Returns the action for a click. While a download runs the same control shows the progress
+/// ring and a ✕ in the middle; a click sends `WorkerCmd::CancelDownload` and returns `None`
+/// (the card turns into "Đã huỷ · Tải lại" when `GuiEvent::DownloadCancelled` arrives).
 fn attachment_action_button(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -2775,8 +2807,8 @@ fn attachment_action_button(
     let resp = ui.interact(rect, id, Sense::click());
     let center = rect.center();
     let r = rect.width() * 0.5;
-    let busy = matches!(state, Some(DownloadState::InProgress { .. }));
-    let bg = if resp.hovered() && !busy { c.btn_hover } else { c.btn_bg };
+    let can_cancel = download_cancel_available();
+    let bg = if resp.hovered() { c.btn_hover } else { c.btn_bg };
     ui.painter().circle_filled(center, r, bg);
     let icon_sz = (r * 1.05).max(12.0);
     let tip = match state {
@@ -2785,16 +2817,25 @@ fn attachment_action_button(
             "Tải về thư mục lưu file".to_string()
         }
         Some(s @ DownloadState::InProgress { .. }) => {
-            paint_progress_ring(
-                ui,
-                center,
-                r - 5.0,
-                s.fraction(),
-                c.track,
-                c.accent,
-            );
+            paint_progress_ring(ui, center, r - 5.0, s.fraction(), c.track, c.accent);
+            // One control both shows the progress and cancels: the ring stays, the ✕ is the
+            // click target (a second, separate button would not fit the 28–32 px chip).
+            if can_cancel {
+                draw_lucide_icon(
+                    ui.painter(),
+                    center,
+                    lucide::X,
+                    (icon_sz * 0.62).max(9.0),
+                    c.warn,
+                );
+            }
             ui.ctx().request_repaint_after(Duration::from_millis(60));
-            download_progress_label(s, false)
+            let label = download_progress_label(s, false);
+            if can_cancel {
+                format!("{label}\nBấm để huỷ tải")
+            } else {
+                format!("{label}\nChế độ demo: không huỷ được tải giả")
+            }
         }
         Some(DownloadState::Done(path)) => {
             draw_lucide_icon(ui.painter(), center, lucide::CHECK, icon_sz, c.ok);
@@ -2804,22 +2845,31 @@ fn attachment_action_button(
             draw_lucide_icon(ui.painter(), center, ICON_RETRY, icon_sz * 0.95, c.err);
             format!("Tải về thất bại: {err}\nBấm để thử lại")
         }
+        Some(DownloadState::Cancelled) => {
+            draw_lucide_icon(ui.painter(), center, ICON_RETRY, icon_sz * 0.95, c.warn);
+            "Đã huỷ tải · Bấm để tải lại".to_string()
+        }
     };
-    let resp = if busy {
-        resp.on_hover_text(tip)
-    } else {
-        resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tip)
-    };
+    let resp = resp
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(tip);
     if !resp.clicked() {
         return None;
     }
     match state {
-        Some(DownloadState::InProgress { .. }) => None,
+        Some(DownloadState::InProgress { .. }) => {
+            if can_cancel {
+                cancel_download(&target.0);
+            }
+            None
+        }
         Some(DownloadState::Done(path)) => Some(BubbleAction::OpenDownloaded(path.clone())),
-        None | Some(DownloadState::Failed(_)) => Some(BubbleAction::Download {
-            url: target.0.clone(),
-            suggested_name: target.1.clone(),
-        }),
+        None | Some(DownloadState::Failed(_)) | Some(DownloadState::Cancelled) => {
+            Some(BubbleAction::Download {
+                url: target.0.clone(),
+                suggested_name: target.1.clone(),
+            })
+        }
     }
 }
 
@@ -2867,11 +2917,21 @@ fn render_download_status(
             }
             ui.ctx().request_repaint_after(Duration::from_millis(60));
             ui.add_space(3.0);
-            ui.label(
-                RichText::new(download_progress_label(state, false))
-                    .size(11.5)
-                    .color(c.muted),
-            );
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.label(
+                    RichText::new(download_progress_label(state, false))
+                        .size(11.5)
+                        .color(c.muted),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if download_cancel_available()
+                        && dl_link(ui, "Huỷ", c.warn, "Huỷ tải tệp này")
+                    {
+                        cancel_download(&target.0);
+                    }
+                });
+            });
         }
         DownloadState::Done(path) => {
             ui.horizontal(|ui| {
@@ -2912,6 +2972,23 @@ fn render_download_status(
                 }
             });
         }
+        DownloadState::Cancelled => {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.label(
+                    RichText::new(format!("{} Đã huỷ tải", lucide::X))
+                        .size(12.0)
+                        .color(c.warn)
+                        .strong(),
+                );
+                if dl_link(ui, "Tải lại", c.accent, "Tải lại tệp này") {
+                    action = Some(BubbleAction::Download {
+                        url: target.0.clone(),
+                        suggested_name: target.1.clone(),
+                    });
+                }
+            });
+        }
     }
     action
 }
@@ -2945,6 +3022,11 @@ fn render_photo_download_pill(
                                 .color(pal.text_secondary),
                         )
                         .on_hover_text(download_progress_label(state, false));
+                        if download_cancel_available()
+                            && dl_link(ui, "Huỷ", pal.warning, "Huỷ tải ảnh này")
+                        {
+                            cancel_download(&target.0);
+                        }
                     }
                     DownloadState::Done(path) => {
                         ui.label(
@@ -2974,6 +3056,20 @@ fn render_photo_download_pill(
                             });
                         }
                     }
+                    DownloadState::Cancelled => {
+                        ui.label(
+                            RichText::new(format!("{} Đã huỷ tải", lucide::X))
+                                .size(11.5)
+                                .color(pal.warning)
+                                .strong(),
+                        );
+                        if dl_link(ui, "Tải lại", accent, "Tải lại ảnh này") {
+                            action = Some(BubbleAction::Download {
+                                url: target.0.clone(),
+                                suggested_name: target.1.clone(),
+                            });
+                        }
+                    }
                 }
             });
         });
@@ -2991,6 +3087,26 @@ impl ZaloGuiApp {
     ) {
         if matches!(self.downloads.get(&url), Some(DownloadState::InProgress { .. })) {
             return;
+        }
+        // The map is keyed by URL for the whole session. `Done` entries must stay (their path is
+        // what "Mở"/"Mở thư mục" hands to the OS) and can only be evicted with a timestamp /
+        // visibility reference owned by `gui.rs`; the terminal "Tải lại" hints are safe to drop
+        // once there are a lot of them. Sorting keeps the eviction deterministic.
+        const MAX_STALE_ENTRIES: usize = 64;
+        let mut stale: Vec<String> = self
+            .downloads
+            .iter()
+            .filter(|(u, s)| {
+                u.as_str() != url
+                    && matches!(s, DownloadState::Cancelled | DownloadState::Failed(_))
+            })
+            .map(|(u, _)| u.clone())
+            .collect();
+        if stale.len() > MAX_STALE_ENTRIES {
+            stale.sort();
+            for old in stale.iter().take(stale.len() - MAX_STALE_ENTRIES) {
+                self.downloads.remove(old);
+            }
         }
         let tx = if is_demo_mode() { None } else { WORKER_TX.get() };
         let Some(tx) = tx else {

@@ -156,6 +156,12 @@ impl ZaloGuiApp {
         }
     }
 
+    /// `GuiEvent::VideoCancelled`: the worker confirmed the abort (it deleted the `.part` file).
+    /// Forget the card if it is still the one on screen (the click usually hid it already).
+    pub(super) fn on_video_cancelled(&mut self, url: String) {
+        self.media.pending.take_if(|p| p.url == url);
+    }
+
     /// Click on a file / voice card: open the finished download, or download it into
     /// "Thư mục lưu file" and open it with its default app when done.
     pub(super) fn download_and_open(&mut self, url: String, suggested_name: String, thread_id: String) {
@@ -364,7 +370,7 @@ impl ZaloGuiApp {
                                 if ui
                                     .add(btn)
                                     .on_hover_cursor(CursorIcon::PointingHand)
-                                    .on_hover_text("Không mở video này")
+                                    .on_hover_text("Huỷ tải video (xoá phần đã tải)")
                                     .clicked()
                                 {
                                     cancel = true;
@@ -374,7 +380,17 @@ impl ZaloGuiApp {
                     });
             });
         if cancel {
-            self.media.pending = None;
+            // Actually stop the transfer first: the worker flips its `CancelFlag`, deletes the
+            // `.part` file and answers `GuiEvent::VideoCancelled` (see `on_video_cancelled`).
+            // Dropping `pending` alone used to leave the download running in the background.
+            if let Some(p) = self.media.pending.take() {
+                match WORKER_TX.get() {
+                    Some(tx) => {
+                        let _ = tx.send(WorkerCmd::CancelDownload { url: p.url });
+                    }
+                    None => self.show_toast("Chế độ demo: không có tiến trình tải nào để huỷ."),
+                }
+            }
         } else {
             ctx.request_repaint_after(Duration::from_millis(if fraction.is_some() { 250 } else { 50 }));
         }
@@ -773,6 +789,10 @@ fn video_controls(
                     Some(DownloadState::Failed(e)) => {
                         (format!("{ICON_RETRY} Tải lại"), format!("Tải về thất bại: {e}"))
                     }
+                    Some(DownloadState::Cancelled) => (
+                        format!("{ICON_RETRY} Tải lại"),
+                        "Đã huỷ tải — bấm để tải lại".to_string(),
+                    ),
                 };
                 let busy = matches!(dl_state, Some(DownloadState::InProgress { .. }));
                 if busy {

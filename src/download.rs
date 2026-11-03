@@ -285,6 +285,32 @@ pub struct Progress {
     pub total: Option<u64>,
 }
 
+/// Cooperative cancellation flag for a running download.
+///
+/// The GUI keeps one flag per in-flight URL (see `WorkerCmd::CancelDownload`). The download loop
+/// checks it between body chunks, deletes the `.part` file and returns [`CANCELLED_ERROR`].
+#[derive(Clone, Default)]
+pub struct CancelFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl CancelFlag {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the running download to stop (idempotent, safe from any thread).
+    pub fn cancel(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Error text returned when the user cancels a download; callers compare against this constant to
+/// tell a cancellation apart from a failure (see `GuiEvent::DownloadCancelled`).
+pub const CANCELLED_ERROR: &str = "Đã huỷ tải.";
+
 /// Stream `url` into `dir` under a sanitised, non-colliding name derived from
 /// `suggested_name` (falling back to the URL's last segment, then [`fallback_name`]).
 ///
@@ -296,7 +322,29 @@ pub async fn download_to_dir(
     dir: &Path,
     progress: impl FnMut(Progress),
 ) -> Result<PathBuf, String> {
-    download_with_policy(client, url, suggested_name, dir, progress, download_url_allowed).await
+    let never = CancelFlag::new();
+    download_to_dir_with_cancel(client, url, suggested_name, dir, &never, progress).await
+}
+
+/// [`download_to_dir`] that the user can abort through `cancel`.
+pub async fn download_to_dir_with_cancel(
+    client: &reqwest::Client,
+    url: &str,
+    suggested_name: &str,
+    dir: &Path,
+    cancel: &CancelFlag,
+    progress: impl FnMut(Progress),
+) -> Result<PathBuf, String> {
+    download_with_policy(
+        client,
+        url,
+        suggested_name,
+        dir,
+        progress,
+        download_url_allowed,
+        cancel,
+    )
+    .await
 }
 
 /// [`download_to_dir`] with the URL policy injected (tests use a plain-http local server).
@@ -307,10 +355,14 @@ async fn download_with_policy(
     dir: &Path,
     mut progress: impl FnMut(Progress),
     url_allowed: fn(&str) -> bool,
+    cancel: &CancelFlag,
 ) -> Result<PathBuf, String> {
     use tokio::io::AsyncWriteExt;
 
     let url = url.trim();
+    if cancel.is_cancelled() {
+        return Err(CANCELLED_ERROR.into());
+    }
     if !url_allowed(url) {
         return Err("Liên kết tải không an toàn hoặc không hợp lệ (chỉ chấp nhận https).".into());
     }
@@ -376,6 +428,9 @@ async fn download_with_policy(
             .await
             .map_err(|e| format!("Mất kết nối khi đang tải: {e}"))?
         {
+            if cancel.is_cancelled() {
+                return Err(CANCELLED_ERROR.into());
+            }
             received += chunk.len() as u64;
             if received > MAX_DOWNLOAD_BYTES {
                 return Err(format!("Tệp vượt giới hạn {}.", format_bytes(MAX_DOWNLOAD_BYTES)));
@@ -799,7 +854,7 @@ mod tests {
         std::fs::write(dir.join("Báo cáo.pdf"), b"existing").unwrap();
         let client = reqwest::Client::new();
         let mut last = None;
-        let p = download_with_policy(&client, &url, "", &dir, |pr| last = Some(pr), |_| true)
+        let p = download_with_policy(&client, &url, "", &dir, |pr| last = Some(pr), |_| true, &CancelFlag::new())
             .await
             .unwrap();
         assert_eq!(p, dir.join("Báo cáo (1).pdf"));
@@ -807,7 +862,7 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("Báo cáo.pdf")).unwrap(), b"existing");
         assert_eq!(last, Some(Progress { received: 300_000, total: Some(300_000) }));
         // Untrusted suggested name with traversal lands inside `dir`.
-        let p2 = download_with_policy(&client, &url, "../../evil.exe", &dir, |_| {}, |_| true)
+        let p2 = download_with_policy(&client, &url, "../../evil.exe", &dir, |_| {}, |_| true, &CancelFlag::new())
             .await
             .unwrap();
         assert_eq!(p2, dir.join("evil.exe"));
@@ -825,7 +880,7 @@ mod tests {
         let url = serve(vec![1u8; 1000], Some(5000), 1).await;
         let dir = temp_dir("trunc");
         let client = reqwest::Client::new();
-        let err = download_with_policy(&client, &url, "x.bin", &dir, |_| {}, |_| true).await;
+        let err = download_with_policy(&client, &url, "x.bin", &dir, |_| {}, |_| true, &CancelFlag::new()).await;
         assert!(err.is_err());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -841,6 +896,56 @@ mod tests {
             .await;
         assert!(e.is_err());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn user_cancel_aborts_and_leaves_no_part_file() {
+        let url = serve(vec![9u8; 1000], Some(1000), 1).await;
+        let dir = temp_dir("cancel");
+        let client = reqwest::Client::new();
+        let flag = CancelFlag::new();
+        let from_progress = flag.clone();
+        // Cancel from the very first progress callback: the loop must stop before writing.
+        let mut calls = 0;
+        let err = download_with_policy(
+            &client,
+            &url,
+            "a.bin",
+            &dir,
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    from_progress.cancel();
+                }
+            },
+            |_| true,
+            &flag,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, CANCELLED_ERROR);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn cancel_before_start_does_not_touch_the_network_or_disk() {
+        let client = reqwest::Client::new();
+        let dir = temp_dir("cancel-early");
+        let flag = CancelFlag::new();
+        flag.cancel();
+        let err = download_to_dir_with_cancel(
+            &client,
+            "https://f.zdn.vn/a.pdf",
+            "a.pdf",
+            &dir,
+            &flag,
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, CANCELLED_ERROR);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
