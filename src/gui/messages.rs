@@ -2139,6 +2139,42 @@ impl Default for ReactBarState {
     }
 }
 
+/// One frame of the picker timers for the bubble `key`: open after resting on the button for
+/// `REACT_OPEN_DELAY`, stay open while on the button or the picker, close `REACT_CLOSE_GRACE`
+/// after leaving both.
+fn advance_react_bar(mut st: ReactBarState, key: Id, now: f64, on_button: bool, on_bar: bool) -> ReactBarState {
+    if on_button || on_bar {
+        if st.key != key {
+            st = ReactBarState { key, open: false, hover_since: now, last_inside: now };
+        }
+        st.last_inside = now;
+        if !st.open && on_button && now - st.hover_since >= REACT_OPEN_DELAY {
+            st.open = true;
+        }
+    } else if st.key == key {
+        if !st.open {
+            // Left the button before the picker opened: start over next time.
+            st = ReactBarState::default();
+        } else if now - st.last_inside > REACT_CLOSE_GRACE {
+            st.open = false;
+        }
+    }
+    st
+}
+
+/// After a click on the button or in the picker: closed, and it does not reopen until the
+/// pointer leaves the button and comes back.
+fn close_react_bar(st: ReactBarState) -> ReactBarState {
+    ReactBarState { open: false, hover_since: f64::INFINITY, ..st }
+}
+
+/// A popup or a context menu is open (egui 0.29 keeps context menus out of `memory.popup`,
+/// in the `BarState` stored under `__egui::context_menu`).
+fn menu_or_popup_open(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.any_popup_open())
+        || egui::menu::BarState::load(ctx, Id::new("__egui::context_menu")).is_some()
+}
+
 /// Hover button (click = 👍) and the 6-reaction picker (plus ✕ when I reacted) of one bubble.
 fn hover_reaction_controls(
     ui: &mut egui::Ui,
@@ -2176,23 +2212,8 @@ fn hover_reaction_controls(
     let in_zone = over_chat.is_some_and(|p| bubble.union(button).expand(2.0).contains(p));
     let on_bar = st.key == key && st.open && pointer.is_some_and(|p| bar.contains(p));
 
-    if on_button || on_bar {
-        if st.key != key {
-            st = ReactBarState { key, open: false, hover_since: now, last_inside: now };
-        }
-        st.last_inside = now;
-        if !st.open && on_button && now - st.hover_since >= REACT_OPEN_DELAY {
-            st.open = true;
-        }
-    } else if st.key == key {
-        if !st.open {
-            // Left the button before the picker opened: start over next time.
-            st = ReactBarState::default();
-        } else if now - st.last_inside > REACT_CLOSE_GRACE {
-            st.open = false;
-        }
-    }
-    let popup_open = ui.memory(|m| m.any_popup_open());
+    st = advance_react_bar(st, key, now, on_button, on_bar);
+    let popup_open = menu_or_popup_open(&ctx);
     let bar_open = demo_forced || (st.key == key && st.open && !popup_open);
     let show = demo_forced || (!popup_open && (in_zone || bar_open));
     if st.key == key && (!st.open && on_button || st.open && !(on_button || on_bar)) {
@@ -2230,7 +2251,7 @@ fn hover_reaction_controls(
         if mine.as_deref() != Some("👍") {
             action = Some(BubbleAction::React("👍"));
         }
-        st.open = false;
+        st = close_react_bar(st);
     }
 
     if bar_open && action.is_none() {
@@ -2291,7 +2312,7 @@ fn hover_reaction_controls(
                 }
             });
         if action.is_some() {
-            st.open = false;
+            st = close_react_bar(st);
         }
     }
     if st != before {
@@ -3407,5 +3428,77 @@ mod react_geometry_tests {
         assert!(bar.left() >= 0.0);
         assert_eq!(bar.bottom(), 294.0);
         assert_eq!(bar.width(), 250.0);
+    }
+}
+
+#[cfg(test)]
+mod react_bar_state_tests {
+    use super::*;
+
+    #[test]
+    fn click_on_button_does_not_reopen_picker() {
+        let key = Id::new("m1");
+        // Pointer enters the button at t = 0, user clicks 👍 at t = 0.1.
+        let st = advance_react_bar(ReactBarState::default(), key, 0.0, true, false);
+        let st = close_react_bar(advance_react_bar(st, key, 0.1, true, false));
+        // Still resting on the button after the click: the picker must stay closed.
+        let st = advance_react_bar(st, key, 0.3, true, false);
+        assert!(!st.open);
+        let st = advance_react_bar(st, key, 1.0, true, false);
+        assert!(!st.open);
+    }
+
+    #[test]
+    fn picker_opens_after_delay_and_again_after_reentering() {
+        let key = Id::new("m1");
+        let st = advance_react_bar(ReactBarState::default(), key, 0.0, true, false);
+        assert!(!advance_react_bar(st, key, 0.2, true, false).open);
+        let st = advance_react_bar(st, key, 0.3, true, false);
+        assert!(st.open);
+        // Closed by a click, pointer leaves, comes back: opens again after the delay.
+        let st = advance_react_bar(close_react_bar(st), key, 0.4, false, false);
+        let st = advance_react_bar(st, key, 0.5, true, false);
+        assert!(advance_react_bar(st, key, 0.8, true, false).open);
+    }
+
+    #[test]
+    fn open_picker_closes_after_grace_when_pointer_leaves() {
+        let key = Id::new("m1");
+        let st = advance_react_bar(ReactBarState::default(), key, 0.0, true, false);
+        let st = advance_react_bar(st, key, 0.3, true, false);
+        assert!(advance_react_bar(st, key, 0.45, false, false).open);
+        assert!(!advance_react_bar(st, key, 0.6, false, false).open);
+    }
+
+    #[test]
+    fn context_menu_counts_as_open_menu() {
+        let ctx = egui::Context::default();
+        let pos = Pos2::new(50.0, 50.0);
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput { events, ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let rect = Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::splat(80.0));
+                    ui.interact(rect, Id::new("bubble"), Sense::click())
+                        .context_menu(|ui| {
+                            ui.label("menu");
+                        });
+                });
+            });
+        };
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(vec![egui::Event::PointerMoved(pos)]);
+        assert!(!menu_or_popup_open(&ctx));
+        frame(vec![button(true)]);
+        frame(vec![button(false)]);
+        frame(vec![]);
+        // egui 0.29 keeps context menus out of `memory.popup`.
+        assert!(!ctx.memory(|m| m.any_popup_open()));
+        assert!(menu_or_popup_open(&ctx));
     }
 }

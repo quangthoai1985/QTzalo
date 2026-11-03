@@ -236,7 +236,12 @@ pub fn set_mine(reactions: &mut Vec<MsgReaction>, emoji: &str) {
 
 pub fn summary(reactions: &[MsgReaction]) -> ReactionSummary {
     let mut s = ReactionSummary::default();
-    for r in reactions.iter().filter(|r| !r.emoji.is_empty()) {
+    // A pre-v0.1.3 entry (no reactor) is most likely the same reaction a live event has since
+    // attributed to someone: do not count it twice. Stored data keeps it.
+    let shadowed = |r: &MsgReaction| {
+        r.uid.is_empty() && reactions.iter().any(|o| !o.uid.is_empty() && o.emoji == r.emoji)
+    };
+    for r in reactions.iter().filter(|r| !r.emoji.is_empty() && !shadowed(r)) {
         s.total += 1;
         match s.emojis.iter_mut().find(|(e, _)| *e == r.emoji) {
             Some(entry) => entry.1 += 1,
@@ -402,6 +407,20 @@ mod tests {
         assert!(apply(&mut r, &ev("222", false, "1", "222", "😆", 5)));
         assert_eq!(summary(&r).total, 2);
         assert_eq!(r[0], MsgReaction { uid: String::new(), emoji: "❤️".into(), ts: 0 });
+    }
+
+    #[test]
+    fn legacy_entry_is_not_counted_twice_with_same_emoji_person() {
+        let legacy = || vec![MsgReaction { uid: String::new(), emoji: "❤️".into(), ts: 0 }];
+        let mut r = legacy();
+        apply(&mut r, &ev("222", false, "1", "222", "❤️", 5));
+        assert_eq!(summary(&r).total, 1);
+        let mut mine = legacy();
+        set_mine(&mut mine, "❤️");
+        let s = summary(&mine);
+        assert_eq!(s.total, 1);
+        assert_eq!(s.emojis, vec![("❤️".to_string(), 1)]);
+        assert_eq!(s.mine.as_deref(), Some("❤️"));
     }
 
     #[test]
