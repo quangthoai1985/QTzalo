@@ -22,6 +22,7 @@ mod session;
 mod socket;
 mod store;
 mod sync_state;
+mod sync_v1;
 mod timefmt;
 mod trace_shape;
 mod tui;

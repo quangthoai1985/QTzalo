@@ -202,6 +202,7 @@ src/
 ├── chat.rs          # Hội thoại, tin nhắn, nhóm, đính kèm, link preview, sticker
 ├── reaction.rs      # Cảm xúc (reaction): đọc sự kiện, đếm cộng dồn, áp vào hội thoại
 ├── sync_state.rs    # Con trỏ đồng bộ bền theo tài khoản, tín hiệu thiếu tin, đồng hồ msgId → thời gian
+├── sync_v1/         # Phần B: định dạng file sao lưu `db-cross-v4` (parse header, KDF, AES-CBC; chưa nối)
 ├── trace_shape.rs   # Trace giao thức chỉ in cấu trúc, không in nội dung tin
 ├── store.rs         # Lịch sử SQLite
 ├── download.rs      # Chính sách tải tệp/ảnh/video: chỉ https, làm sạch tên, không ghi đè, Mark-of-the-Web
