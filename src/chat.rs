@@ -3022,6 +3022,27 @@ impl Default for PollState {
     }
 }
 
+/// The queue action ids a long-poll echoes back: at most the 10 newest ids `<= last_id`,
+/// ascending. [O] `QueueControl.getLastActionIdsArray` (`sync-v2-sub-worker.js:1606950`): sort
+/// descending, take at most 10 <= lastId, then reverse. Ids come as strings or numbers.
+pub(crate) fn newest_action_ids(ids_arr: &[Value], last_id: &str) -> Vec<String> {
+    let max_lid = last_id.parse::<u128>().unwrap_or(u128::MAX);
+    let mut ids: Vec<String> = ids_arr
+        .iter()
+        .filter_map(|v| match v {
+            Value::String(s) if !s.is_empty() => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+        .filter(|s| s.parse::<u128>().map(|n| n <= max_lid).unwrap_or(true))
+        .collect();
+    ids.sort_by_key(|s| std::cmp::Reverse(s.parse::<u128>().unwrap_or(0)));
+    ids.dedup();
+    ids.truncate(10);
+    ids.reverse();
+    ids
+}
+
 fn max_action_id(a: &str, b: &str) -> String {
     let na = a.parse::<u128>().unwrap_or(0);
     let nb = b.parse::<u128>().unwrap_or(0);
@@ -3098,23 +3119,8 @@ impl PollState {
                     }
                 }
                 if let Some(ids_arr) = qval.get("ids").and_then(Value::as_array) {
-                    let max_lid = entry.last_id.parse::<u128>().unwrap_or(u128::MAX);
-                    let mut new_ids: Vec<String> = ids_arr
-                        .iter()
-                        .filter_map(|v| match v {
-                            Value::String(s) if !s.is_empty() => Some(s.clone()),
-                            Value::Number(n) => Some(n.to_string()),
-                            _ => None,
-                        })
-                        .filter(|s| s.parse::<u128>().map(|n| n <= max_lid).unwrap_or(true))
-                        .collect();
+                    let new_ids = newest_action_ids(ids_arr, &entry.last_id);
                     if !new_ids.is_empty() {
-                        // [O] `QueueControl.getLastActionIdsArray` (`sync-v2-sub-worker.js:1606950`):
-                        // sort descending, take at most 10 <= lastId, then reverse so `ids` is ascending.
-                        new_ids.sort_by_key(|s| std::cmp::Reverse(s.parse::<u128>().unwrap_or(0)));
-                        new_ids.dedup();
-                        new_ids.truncate(10);
-                        new_ids.reverse();
                         entry.ids = new_ids;
                     }
                 }
