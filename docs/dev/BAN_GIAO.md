@@ -41,9 +41,17 @@ Phiên này đọc toàn bộ mã nguồn, đối chiếu tài liệu và kho ng
 thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md`. CHANGELOG: mục `[0.1.4]`.
 **Đã tăng phiên bản lên 0.1.4 và phát hành** (tag/run ghi ở mục "Phát hành v0.1.4" bên dưới).
 
-- **Phát hành v0.1.4:** `Cargo.toml` = `0.1.4`; `CHANGELOG.md` mục `[0.1.4] - 2026-11-04`;
-  `.github/release-notes.md` viết lại cho bản này; commit phát hành và tag do workflow tạo
-  (chi tiết tag/run xem lịch sử git của file này và trang Releases).
+- **Phát hành v0.1.4 (đã xong):**
+  - `Cargo.toml` = `0.1.4`; `CHANGELOG.md` mục `[0.1.4] - 2026-11-04`; `.github/release-notes.md`
+    viết lại cho bản này; push `main` (`6ad6b93`) rồi `gh workflow run ci-release.yml --ref main
+    -f release=true`.
+  - [Release v0.1.4](https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.4), tag `v0.1.4`
+    = `6ad6b93`; workflow run `41687192754` **success cả 6 job** (Test/MSRV/audit, Linux, Windows,
+    macOS, Publish).
+  - **Đủ 6 file**, lần này **có cả `.dmg`** (job macOS best-effort chạy xong sau 2m57s):
+    `QTzalo-0.1.4-setup-windows-x86_64.exe`, `QTzalo-0.1.4-portable-windows-x86_64.exe`,
+    `qtzalo_0.1.4_amd64.deb`, `qtzalo-0.1.4-linux-x86_64.tar.gz`,
+    `QTzalo-0.1.4-macos-arm64.dmg`, `SHA256SUMS.txt`.
 
 - **Đã sửa (P0):**
   - `store::messages_for` trả tin **mới nhất** (trước trả cũ nhất); thêm WAL/`busy_timeout`;
