@@ -6,7 +6,11 @@
 ## 0. v0.1.3 (2026-11-03) — tóm tắt cho phiên sau
 
 - **Phiên chạy trên PC Windows của người dùng**, với tài khoản Zalo thật và điện thoại thật.
-- **Phát hành:** nhánh `claude/v0.1.3` được fast-forward vào `main` (`daa4d6e`), đã push, nhánh cục bộ đã xoá. Release `v0.1.3` do workflow `ci-release.yml` build (run `41653890025`).
+- **Phát hành:**
+  - nhánh `claude/v0.1.3` được fast-forward vào `main` (`daa4d6e`), đã push, nhánh cục bộ đã xoá;
+  - [Release v0.1.3](https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.3) do workflow `ci-release.yml` build (run `41653890025`), tag `v0.1.3` = `daa4d6e`;
+  - có 5 file: bộ cài và bản portable Windows, `.deb`, `.tar.gz`, `SHA256SUMS.txt`;
+  - **thiếu `.dmg`**: job macOS (best effort) bị huỷ sau 15 phút chờ máy chạy của GitHub, chưa chạy bước nào. Vì vậy workflow báo `failure`, nhưng job phát hành vẫn chạy vì chỉ cần `test` + `windows` xanh.
 - **Đã làm:**
   - **Thả cảm xúc khi rê chuột:** nút tròn ngoài mép bong bóng (bấm = 👍); dừng chuột 250 ms thì bung thanh 6 cảm xúc; nút ✕ gỡ (`src/gui/messages.rs`: `hover_reaction_controls`, `advance_react_bar`, `menu_or_popup_open`).
   - **Nhận reaction theo thời gian thực:** socket `612` lúc đang mở; queue `610_1`/`611_1` và `lp_control` để bù sau khi tắt máy (`src/reaction.rs`, `GuiEvent::ReactionsReceived`).
