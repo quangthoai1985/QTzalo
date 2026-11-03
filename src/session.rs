@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use reqwest::cookie::Jar;
 use reqwest::header::{HeaderMap, HeaderValue, ORIGIN, REFERER};
-use reqwest::{Client, Method, RequestBuilder};
+use reqwest::{Client, ClientBuilder, Method, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -18,6 +18,17 @@ use crate::crypto;
 pub const ZPW_VER: &str = "694";
 pub const ZPW_TYPE: &str = "30";
 pub const CONFIG_DOMAIN: &str = "zaloapp.com";
+
+/// `User-Agent` of Zalo PC 26.10.11 — sent by every client QTzalo builds.
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+     (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36";
+/// Deadline of one ordinary API exchange — connect, request *and* the whole response body.
+const API_TIMEOUT_SECS: u64 = 35;
+/// TCP connect deadline; the same for API calls and for long downloads.
+const CONNECT_TIMEOUT_SECS: u64 = 10;
+/// A download that delivers no byte for this long is treated as a dead connection. There is
+/// deliberately no *total* deadline for downloads — see [`Session::streaming_http`].
+const STREAM_READ_TIMEOUT_SECS: u64 = 60;
 
 /// Domain table.
 ///
@@ -307,27 +318,29 @@ pub struct Session {
     pub dump_raw: bool,
 }
 
+/// Everything that makes a request *authenticated*, shared by every client of one [`Session`]:
+/// the cookie jar (`zpw_sek` set at login lives there), the `Origin`/`Referer` defaults, the
+/// user agent, the TLS backend and reqwest's default redirect policy (follow up to 10 hops).
+///
+/// Callers add only the deadlines they need: [`Session::new`] puts the 35 s API deadline on top,
+/// [`Session::streaming_http`] deliberately leaves the total deadline off. Nothing else may
+/// differ, so a download sees exactly the cookies an API call would.
+fn base_http_builder(jar: &Arc<Jar>) -> ClientBuilder {
+    let mut default_headers = HeaderMap::new();
+    default_headers.insert(REFERER, HeaderValue::from_static("https://chat.zalo.me/"));
+    default_headers.insert(ORIGIN, HeaderValue::from_static("https://chat.zalo.me"));
+    Client::builder()
+        .cookie_provider(Arc::clone(jar))
+        .default_headers(default_headers)
+        .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .user_agent(USER_AGENT)
+}
+
 impl Session {
     pub fn new(verbose: bool, dump: bool, dump_raw: bool) -> Result<Self> {
         let jar = Arc::new(Jar::default());
-        let mut default_headers = HeaderMap::new();
-        default_headers.insert(
-            REFERER,
-            HeaderValue::from_static("https://chat.zalo.me/"),
-        );
-        default_headers.insert(
-            ORIGIN,
-            HeaderValue::from_static("https://chat.zalo.me"),
-        );
-        let http = Client::builder()
-            .cookie_provider(Arc::clone(&jar))
-            .default_headers(default_headers)
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(35))
-            .user_agent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36",
-            )
+        let http = base_http_builder(&jar)
+            .timeout(std::time::Duration::from_secs(API_TIMEOUT_SECS))
             .build()?;
         Ok(Self {
             http,
@@ -343,6 +356,42 @@ impl Session {
             dump,
             dump_raw,
         })
+    }
+
+    /// Client for **long streaming transfers**: chat files, videos and original photos.
+    ///
+    /// [`Self::http`] carries `.timeout(35 s)`, and reqwest applies that deadline to the whole
+    /// exchange — the response body included — so any download that needs more than 35 s (a big
+    /// attachment, a slow link) was aborted mid-body by the client, even though
+    /// [`crate::download::download_to_dir`] streams into `*.part` and never buffers the file.
+    ///
+    /// This client keeps everything that makes a request *authenticated* — the same cookie [`Jar`]
+    /// (so the `zpw_sek` cookie set at login rides along), the same `Origin`/`Referer` defaults,
+    /// the same user agent, TLS and reqwest's default redirect policy (up to 10 hops; the download
+    /// code re-validates the URL after every redirect) — and drops only the *total* deadline:
+    /// `connect_timeout(10 s)` plus `read_timeout(60 s)`, so a connection that delivers no byte
+    /// for a minute is still treated as dead.
+    ///
+    /// `Client` is reference-counted and cheap to clone, so a call site may build one per
+    /// download. **Never** use it for API calls: those must keep the 35 s deadline.
+    pub fn streaming_http(&self) -> Client {
+        match self.build_streaming_http() {
+            Ok(client) => client,
+            // A static header set cannot fail in practice, but if it ever does, a download that
+            // still has the old 35 s deadline beats no download at all.
+            Err(e) => {
+                crate::logger::log_error("session::streaming_http", &e.to_string());
+                self.http.clone()
+            }
+        }
+    }
+
+    /// Fallible construction behind [`Self::streaming_http`], kept separate so it can be tested
+    /// without going through the fallback.
+    fn build_streaming_http(&self) -> Result<Client> {
+        Ok(base_http_builder(&self.jar)
+            .read_timeout(std::time::Duration::from_secs(STREAM_READ_TIMEOUT_SECS))
+            .build()?)
     }
 
     /// Store `zpw_sek` session token, attach it to `self.login`, and insert the session cookie.
@@ -500,24 +549,8 @@ impl Session {
         self.secret_key = None;
         self.session_key = None;
         self.jar = Arc::new(Jar::default());
-        let mut default_headers = HeaderMap::new();
-        default_headers.insert(
-            REFERER,
-            HeaderValue::from_static("https://chat.zalo.me/"),
-        );
-        default_headers.insert(
-            ORIGIN,
-            HeaderValue::from_static("https://chat.zalo.me"),
-        );
-        if let Ok(c) = Client::builder()
-            .cookie_provider(Arc::clone(&self.jar))
-            .default_headers(default_headers)
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(35))
-            .user_agent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) ZaloPC/26.10.11 Chrome/122.0.0.0 Electron/29.0.0 Safari/537.36",
-            )
+        if let Ok(c) = base_http_builder(&self.jar)
+            .timeout(std::time::Duration::from_secs(API_TIMEOUT_SECS))
             .build()
         {
             self.http = c;
@@ -1247,5 +1280,41 @@ mod tests {
         assert!(!is_trusted_zalo_url("https://evilzalo.me/", &["https"]));
         assert!(is_trusted_zalo_url("wss://ws1-msg.chat.zalo.me/?a=1", &["wss"]));
         assert!(!is_trusted_zalo_url("ws://ws1-msg.chat.zalo.me/", &["wss"]));
+    }
+
+    // -- long downloads: a client with the cookie jar but no 35 s total deadline -----
+
+    #[test]
+    fn streaming_http_builds_and_shares_the_session_cookie_jar() {
+        let s = Session::new(false, false, false).unwrap();
+        // `http` already holds one reference to the jar; the streaming client must take another
+        // reference to the *same* jar — a fresh, empty jar would download as a stranger.
+        let before = Arc::strong_count(&s.jar);
+        let streaming = s.streaming_http();
+        assert!(
+            Arc::strong_count(&s.jar) > before,
+            "the streaming client must share the session cookie jar"
+        );
+        drop(streaming);
+
+        // Construction is repeatable and must not depend on the network.
+        assert!(s.build_streaming_http().is_ok());
+        assert!(s.build_streaming_http().is_ok());
+    }
+
+    #[test]
+    fn streaming_http_sees_the_zpw_sek_cookie() {
+        use reqwest::cookie::CookieStore;
+        let mut s = Session::new(false, false, false).unwrap();
+        s.set_zpw_sek("streaming-sek".into());
+        let _client = s.streaming_http();
+        let header = s
+            .jar
+            .cookies(&reqwest::Url::parse("https://chat.zalo.me/").unwrap())
+            .expect("the jar must hold the zpw_sek cookie");
+        assert!(
+            header.to_str().unwrap().contains("zpw_sek=streaming-sek"),
+            "{header:?}"
+        );
     }
 }
