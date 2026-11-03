@@ -25,6 +25,7 @@ Tài liệu cho người dùng và người phát triển QTzalo (`zalo-rust`).
 | [re-notes/12](../re-notes/12_zalo-electron-va-dung-luong.md) | Vì sao Zalo PC (Electron) ổn định nhưng phình dung lượng: số đo thật trên máy và bài học cho QTzalo. |
 | [re-notes/13](../re-notes/13_db_cross_v4.md) | Bản đồ nhị phân `db-cross-v4` (Phần B, B3.3): PE32 ia32, export ẩn sau `_register_addon_`, XZ/LZMA, AES tự viết, MD5, container nhiều DB, tên trường protobuf. |
 | [re-notes/14](../re-notes/14_db_cross_v4_disasm.md) | Disassemble `db-cross-v4` bằng `dumpbin`: địa chỉ 4 hàm N-API, magic header `ZDB4.0`, AES-256 + PKCS#7, liblzma/XZ; KDF và thứ tự nén↔mã hoá còn mở. |
+| [re-notes/15](../re-notes/15_db_cross_v4_decrypt.md) | Chốt định dạng `db-cross-v4`: layout header byte (magic `ZDB4.0`, XXH32, danh sách file), KDF = password zero-pad, AES-256-CBC IV 0, thứ tự giải mã→header→giải nén, pseudocode Rust. |
 
 ## Build và chạy nhanh
 

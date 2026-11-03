@@ -1,5 +1,12 @@
 # 14 — `db-cross-v4` (B3.3): giải mã bằng disassembler thật (PE32 i386)
 
+> **⚠️ ĐÍNH CHÍNH (04/11/2026):** `re-notes/15_db_cross_v4_decrypt.md` đọc tiếp asm và sửa 6 điểm của
+> file này: (a) `0x28470` là **571 lệnh** (không phải 1.109) và `0x29680` là **dead code** (0 xref) —
+> bỏ khỏi sơ đồ suy thứ tự; (b) **thứ tự đã chốt**: giải mã → parse header → giải nén; (c) hash header
+> là **XXH32 seed 0**, không phải MD5; (d) **KDF không biến đổi**: key = 32 byte đầu của `password`
+> zero-pad (256 B); (e) `0x1C0C0` còn giải mã **tại chỗ** theo chunk; (f) `0x3F9F0` là phía **ghi** XZ.
+> Đọc file 15 cho kết luận cuối.
+>
 > **Ngày:** 2026-11-03/04. **Phạm vi:** phân tích **tĩnh** `db-cross-v4-native.node` trong
 > `%LOCALAPPDATA%\Programs\Zalo\Zalo-26.10.20\resources\app.asar.unpacked\native\nativelibs\db-cross-v4\prebuilt\window\electron_x86\`.
 > **Không chạy mã Zalo, không gọi mạng, không sửa file nào ngoài note này.**
