@@ -4231,8 +4231,39 @@ pub fn legacy_media_kind(msg: &ChatMessage) -> Option<MediaKind> {
     (text == url || kind == MediaKind::File).then_some(kind)
 }
 
+/// Bubble text for a message QTzalo cannot read: Zalo's end-to-end (Signal) encrypted payloads.
+///
+/// [I] Not yet observed on a real account (61/61 groups reported `e2eeStatus = 0` on 03/11), so
+/// this is a display-safety placeholder, not a feature: the message is shown as unreadable here
+/// and the user is pointed at the phone, which holds the keys.
+pub const E2EE_PLACEHOLDER_TEXT: &str = "[Tin nhắn mã hoá đầu cuối — xem trên điện thoại]";
+
+/// Payload keys that can carry the end-to-end-encryption flag of one message.
+const E2EE_FLAG_KEYS: &[&str] = &["e2eeStatus", "e2ee"];
+
+/// `true` only when a message payload states **explicitly** that its content is E2EE.
+///
+/// [I] Accepted evidence, nothing else: the boolean `true`, a non-zero number, or a numeric string
+/// other than `"0"`/`""` under [`E2EE_FLAG_KEYS`]. Deliberately *not* inferred from payload
+/// length, alphabet (base64-looking text), `msgType` or unknown fields: mislabelling an ordinary
+/// message as encrypted replaces readable text with a "xem trên điện thoại" bubble, which is worse
+/// than showing one ciphertext bubble by mistake. A `false`/`0`/`""` value, a missing field and any
+/// unparsable string all mean "not encrypted" as far as this client can tell.
+pub fn e2ee_placeholder_needed(payload: &Value) -> bool {
+    E2EE_FLAG_KEYS.iter().any(|key| match payload.get(*key) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+        Some(Value::String(s)) => {
+            let t = s.trim();
+            !t.is_empty() && t != "0" && t.parse::<f64>().map(|f| f != 0.0).unwrap_or(false)
+        }
+        _ => false,
+    })
+}
+
 fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     let msg_type = normalize_msg_type(it);
+    let is_e2ee = e2ee_placeholder_needed(it);
 
     let raw_content_val = it
         .get("content")
@@ -4250,7 +4281,8 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
     let mut content = raw_content_val
         .and_then(extract_content_text)
         .unwrap_or_default();
-    let is_undo_type = matches!(msg_type.as_str(), "chat.undo" | "undo" | "31");
+    // An E2EE payload names no readable content, so it is never an undo of another message.
+    let is_undo_type = !is_e2ee && matches!(msg_type.as_str(), "chat.undo" | "undo" | "31");
     if is_undo_type {
         content = "[Tin nhắn đã thu hồi]".to_string();
         sticker_meta = None;
@@ -4388,7 +4420,7 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         (None, None, None)
     };
 
-    Some(ChatMessage {
+    let mut parsed = ChatMessage {
         id: msg_id,
         sender: display_sender,
         text: content,
@@ -4417,7 +4449,28 @@ fn parse_chat_message(it: &Value) -> Option<ChatMessage> {
         link_desc,
         link_thumb,
         link_src,
-    })
+    };
+
+    // [I] End-to-end encrypted payload: never decrypt, never guess. Show the placeholder and drop
+    // everything that could leak ciphertext or mis-render it (sticker ids, card fields, quote).
+    // `id`/`cli_msg_id`/`sender`/`ts` stay: they are metadata the server sends in clear and are
+    // what de-duplication, ordering and reactions need.
+    if is_e2ee {
+        parsed.text = E2EE_PLACEHOLDER_TEXT.to_string();
+        parsed.sticker_id = None;
+        parsed.sticker_cate_id = None;
+        parsed.sticker_type = None;
+        parsed.reply_to_id = None;
+        parsed.reply_to_sender = None;
+        parsed.reply_to_text = None;
+        parsed.link_url = None;
+        parsed.link_title = None;
+        parsed.link_desc = None;
+        parsed.link_thumb = None;
+        parsed.link_src = None;
+    }
+
+    Some(parsed)
 }
 
 /// Reactions embedded in a history item. They carry no reactor, so they are stored like
@@ -6054,6 +6107,125 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert_eq!(err, expected);
+        }
+    }
+
+    // -- Đợt 3: an toàn hiển thị E2EE ([I], chưa có tin mã hoá thật để kiểm chứng) ------
+
+    #[test]
+    fn e2ee_flag_only_from_explicit_fields() {
+        // Explicit evidence: non-zero number, numeric string, boolean true.
+        assert!(e2ee_placeholder_needed(&json!({ "e2eeStatus": 1 })));
+        assert!(e2ee_placeholder_needed(&json!({ "e2eeStatus": 7 })));
+        assert!(e2ee_placeholder_needed(&json!({ "e2eeStatus": "2" })));
+        assert!(e2ee_placeholder_needed(&json!({ "e2eeStatus": " 1 " })));
+        assert!(e2ee_placeholder_needed(&json!({ "e2ee": true })));
+        assert!(e2ee_placeholder_needed(&json!({ "e2ee": 1 })));
+
+        // No evidence: zero, empty, unparsable, null, missing.
+        assert!(!e2ee_placeholder_needed(&json!({ "e2eeStatus": 0 })));
+        assert!(!e2ee_placeholder_needed(&json!({ "e2eeStatus": "0" })));
+        assert!(!e2ee_placeholder_needed(&json!({ "e2eeStatus": "" })));
+        assert!(!e2ee_placeholder_needed(
+            &json!({ "e2eeStatus": "khong-phai-so" })
+        ));
+        assert!(!e2ee_placeholder_needed(&json!({ "e2eeStatus": null })));
+        assert!(!e2ee_placeholder_needed(&json!({ "e2ee": false })));
+        assert!(!e2ee_placeholder_needed(&json!({ "e2ee": 0 })));
+        assert!(!e2ee_placeholder_needed(&json!({ "e2ee": "" })));
+        assert!(!e2ee_placeholder_needed(&json!({ "msgId": "1" })));
+
+        // Anti-regression: base64-looking content and an unknown `msgType` are NOT evidence.
+        assert!(!e2ee_placeholder_needed(
+            &json!({ "content": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=" })
+        ));
+        assert!(!e2ee_placeholder_needed(&json!({
+            "msgType": "chat.encrypt",
+            "content": "aGVsbG8gd29ybGQ=",
+            "msgId": "8447783931887"
+        })));
+    }
+
+    #[test]
+    fn e2ee_message_becomes_a_placeholder_bubble() {
+        const CIPHERTEXT: &str = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=";
+        let v = json!({
+            "msgId": "8447783931887",
+            "cliMsgId": "1793705979715",
+            "uidFrom": "222",
+            "dName": "Người gửi",
+            "ts": "1793705979842",
+            "msgType": "webchat",
+            "e2eeStatus": 1,
+            "content": CIPHERTEXT,
+            "quote": { "msg": "trích dẫn", "cliMsgId": "1" },
+        });
+        let m = parse_chat_message(&v).expect("vẫn phải hiện bong bóng");
+        assert_eq!(m.text, E2EE_PLACEHOLDER_TEXT);
+        assert!(!m.text.contains(CIPHERTEXT), "không được lộ chuỗi mã hoá");
+        // Clear metadata still builds a usable row: dedup, ordering and reactions need it.
+        assert_eq!(m.id, "8447783931887");
+        assert_eq!(m.cli_msg_id.as_deref(), Some("1793705979715"));
+        assert_eq!(m.sender, "Người gửi");
+        assert!(!m.is_outgoing);
+        assert_eq!(m.ts, 1793705979842);
+        // Nothing that could carry ciphertext or render a broken card survives.
+        assert_eq!(
+            (m.link_url, m.link_title, m.link_desc, m.link_thumb, m.link_src),
+            (None, None, None, None, None)
+        );
+        assert_eq!(
+            (m.sticker_id, m.sticker_cate_id, m.sticker_type),
+            (None, None, None)
+        );
+        assert_eq!(
+            (m.reply_to_id, m.reply_to_sender, m.reply_to_text),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn e2ee_string_flag_and_bool_flag_also_get_a_placeholder() {
+        // `e2eeStatus: "2"` and `e2ee: true` are the other two explicit shapes.
+        for extra in [json!({ "e2eeStatus": "2" }), json!({ "e2ee": true })] {
+            let mut v = json!({
+                "msgId": "8447783936000",
+                "uidFrom": "222",
+                "ts": "1793705979842",
+                "msgType": "webchat",
+                "content": "QUJDREVGR0hJSktMTU5PUA==",
+            });
+            for (k, val) in extra.as_object().unwrap() {
+                v[k.as_str()] = val.clone();
+            }
+            let m = parse_chat_message(&v).expect("phải hiện bong bóng");
+            assert_eq!(m.text, E2EE_PLACEHOLDER_TEXT, "{v}");
+        }
+    }
+
+    #[test]
+    fn ordinary_messages_keep_their_text_when_e2ee_is_absent_or_off() {
+        // (d) status 0, (e) no field at all (pre-E2EE server), (f) `e2ee: false`.
+        for extra in [
+            json!({ "e2eeStatus": 0 }),
+            json!({ "e2eeStatus": "0" }),
+            json!({}),
+            json!({ "e2ee": false }),
+        ] {
+            let mut v = json!({
+                "msgId": "8447783937000",
+                "uidFrom": "0",
+                "idTo": "222",
+                "ts": "1793705979842",
+                "msgType": "webchat",
+                "content": "xin chào",
+            });
+            for (k, val) in extra.as_object().unwrap() {
+                v[k.as_str()] = val.clone();
+            }
+            let m = parse_chat_message(&v).expect("tin thường phải parse được");
+            assert_eq!(m.text, "xin chào", "{v}");
+            assert!(m.is_outgoing, "{v}");
         }
     }
 }
