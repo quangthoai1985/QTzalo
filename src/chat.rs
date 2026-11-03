@@ -548,6 +548,19 @@ fn failed(action: &str, (code, message): (i64, String)) -> anyhow::Error {
     }
 }
 
+/// Reject a **write** action whose reply carries a non-zero `error_code`.
+///
+/// One place for the rule every mutating call in this module follows: log the server code under
+/// `scope`, then hand the caller a Vietnamese `Err` naming the action (`action`). A reply with no
+/// `error_code` has no verdict, so it is not turned into a failure here.
+fn ensure_action_ok(action: &str, scope: &str, reply: &Value) -> Result<()> {
+    if let Some(err) = reply_error(reply) {
+        crate::logger::log_error(scope, &format!("mã {}: {}", err.0, err.1));
+        return Err(failed(action, err));
+    }
+    Ok(())
+}
+
 /// Send a 1-1 text message: `POST {domains.chat}/api/message/sms?{common}`
 pub async fn send_message(s: &Session, to_id: &str, text: &str) -> Result<Value> {
     if s.login.is_none() {
@@ -1479,10 +1492,9 @@ pub async fn send_link_message(
             let url = format!("{}/api/group/sendlink?{}", s.domains.group, s.common_params());
             let resp = s.post_form(&url, format!("params={params}")).await?;
             let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
-            if let Some(code) = dec.get("error_code").and_then(Value::as_i64) {
-                if code != 0 {
-                    anyhow::bail!("sendlink group error {code}");
-                }
+            // Carry the server's own reason (group variant): the user sees it, the wrapper logs it.
+            if let Some(err) = reply_error(&dec) {
+                return Err(failed("Gửi tin kèm liên kết", err));
             }
             Ok(dec)
         } else {
@@ -1514,10 +1526,9 @@ pub async fn send_link_message(
             let url = format!("{host}/api/message/link?{}", s.common_params());
             let resp = s.post_form(&url, format!("params={params}")).await?;
             let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
-            if let Some(code) = dec.get("error_code").and_then(Value::as_i64) {
-                if code != 0 {
-                    anyhow::bail!("sendlink error {code}");
-                }
+            // Carry the server's own reason (1-1 variant): the user sees it, the wrapper logs it.
+            if let Some(err) = reply_error(&dec) {
+                return Err(failed("Gửi tin kèm liên kết", err));
             }
             Ok(dec)
         }
@@ -2363,10 +2374,9 @@ pub async fn send_quote_message(
             let url = format!("{}/api/group/quote?{}", s.domains.group, s.common_params());
             let resp = s.post_form(&url, format!("params={params}")).await?;
             let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
-            if let Some(code) = resp.get("error_code").and_then(Value::as_i64) {
-                if code != 0 {
-                    anyhow::bail!("quote error {code}");
-                }
+            // Keep the server's reason (group variant); the wrapper logs it and adds context.
+            if let Some(err) = reply_error(&resp) {
+                return Err(failed("Gửi tin trích dẫn", err));
             }
             Ok(resp)
         } else {
@@ -2396,10 +2406,9 @@ pub async fn send_quote_message(
             let url = format!("{host}/api/message/quote?{}", s.common_params());
             let resp = s.post_form(&url, format!("params={params}")).await?;
             let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
-            if let Some(code) = resp.get("error_code").and_then(Value::as_i64) {
-                if code != 0 {
-                    anyhow::bail!("quote error {code}");
-                }
+            // Keep the server's reason (1-1 variant); the wrapper logs it and adds context.
+            if let Some(err) = reply_error(&resp) {
+                return Err(failed("Gửi tin trích dẫn", err));
             }
             Ok(resp)
         }
@@ -2551,10 +2560,7 @@ pub async fn send_reaction(
     let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
     // The reaction endpoint answers HTTP 200 with `error_code != 0` on refusal; without this
     // check a failed tap looked delivered (the GUI had already added it optimistically).
-    if let Some(err) = reply_error(&resp) {
-        crate::logger::log_error("chat::send_reaction", &format!("mã {}: {}", err.0, err.1));
-        return Err(failed("Thả cảm xúc", err));
-    }
+    ensure_action_ok("Thả cảm xúc", "chat::send_reaction", &resp)?;
     Ok(resp)
 }
 
@@ -2597,7 +2603,7 @@ pub async fn delete_message_for_me(
         "destId": to_id
     }]);
 
-    if is_group {
+    let reply = if is_group {
         let clean_grid = to_id
             .trim_start_matches("group_")
             .trim_start_matches('g')
@@ -2611,7 +2617,7 @@ pub async fn delete_message_for_me(
         let params = s.encoded_params(&body)?;
         let url = format!("{}/api/group/deletemsg?{}", s.domains.group, s.common_params());
         let resp = s.post_form(&url, format!("params={params}")).await?;
-        Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+        s.maybe_decrypt(resp, s.session_key_bytes()).await
     } else {
         let host = if s.domains.chat.contains("-msg-chat.")
             || s.domains.chat.contains("tt-chat2-wpa")
@@ -2631,8 +2637,12 @@ pub async fn delete_message_for_me(
         let params = s.encoded_params(&body)?;
         let url = format!("{host}/api/message/delete?{}", s.common_params());
         let resp = s.post_form(&url, format!("params={params}")).await?;
-        Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
-    }
+        s.maybe_decrypt(resp, s.session_key_bytes()).await
+    };
+    // "Xoá chỉ ở phía tôi" reported success as soon as the HTTP call left the client, so a
+    // refused delete kept the bubble on the server while the UI had already removed it.
+    ensure_action_ok("Xoá tin nhắn", "chat::delete_message_for_me", &reply)?;
+    Ok(reply)
 }
 
 /// Recall / undo an outgoing message for everyone (`undoMessage` @ `compact-app-pc.js:14376599`, cmd `11281` / `11192`).
@@ -2655,7 +2665,7 @@ pub async fn recall_message(
         now.to_string()
     };
 
-    if is_group {
+    let reply = if is_group {
         let clean_grid = to_id
             .trim_start_matches("group_")
             .trim_start_matches('g')
@@ -2671,7 +2681,7 @@ pub async fn recall_message(
         let params = s.encoded_params(&body)?;
         let url = format!("{}/api/group/undomsg?{}", s.domains.group, s.common_params());
         let resp = s.post_form(&url, format!("params={params}")).await?;
-        Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+        s.maybe_decrypt(resp, s.session_key_bytes()).await
     } else {
         let host = if s.domains.chat.contains("-msg-chat.")
             || s.domains.chat.contains("tt-chat2-wpa")
@@ -2690,8 +2700,12 @@ pub async fn recall_message(
         let params = s.encoded_params(&body)?;
         let url = format!("{host}/api/message/undo?{}", s.common_params());
         let resp = s.post_form(&url, format!("params={params}")).await?;
-        Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
-    }
+        s.maybe_decrypt(resp, s.session_key_bytes()).await
+    };
+    // A refused recall (too late, not the sender, no permission) used to look like a recall:
+    // the bubble stayed everywhere but the local UI had already greyed it out.
+    ensure_action_ok("Thu hồi tin nhắn", "chat::recall_message", &reply)?;
+    Ok(reply)
 }
 
 /// `GET /api/preloadconvers/get-last-msgs` (cmd 10053).
@@ -2787,7 +2801,12 @@ pub async fn get_group_history(s: &Session, group_id: &str, count: u32) -> Resul
     );
     match s.get(&url).await {
         Ok(resp) => Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await),
-        Err(_) => get_group_history_raw(s, grid, count).await,
+        Err(e) => {
+            // Keep the original cause: the raw probe below asks the same question with a
+            // different body, so a silent fallback hides which request actually failed.
+            crate::logger::log_error("chat::get_group_history", &format!("{e:#}"));
+            get_group_history_raw(s, grid, count).await
+        }
     }
 }
 
@@ -4933,7 +4952,10 @@ pub async fn undo_friend_request(s: &Session, fid: &str) -> Result<Value> {
         s.common_params()
     );
     let resp = s.post_form(&url, format!("params={enc}")).await?;
-    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+    let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+    // Cancelling a request is a write action: a refusal must not look like success.
+    ensure_action_ok("Huỷ lời mời kết bạn", "chat::undo_friend_request", &dec)?;
+    Ok(dec)
 }
 
 /// Reject a pending incoming friend request (`/api/friend/reject`, cmd `11428`).
@@ -4954,7 +4976,10 @@ pub async fn reject_friend_request(s: &Session, fid: &str) -> Result<Value> {
         s.common_params()
     );
     let resp = s.post_form(&url, format!("params={enc}")).await?;
-    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+    let dec = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+    // Same rule as `undo_friend_request`: rejecting is a write, report a refusal.
+    ensure_action_ok("Từ chối lời mời kết bạn", "chat::reject_friend_request", &dec)?;
+    Ok(dec)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -5989,5 +6014,46 @@ mod tests {
         let empty_page = json!({ "error_code": 0, "data": {} });
         assert!(!is_poll_timeout(&empty_page));
         assert_ne!(empty_page.get(LP_TIMEOUT_KEY), timeout.get(LP_TIMEOUT_KEY));
+    }
+
+    // -- Đợt 2 (tiếp): mọi hành động ghi đều kiểm `error_code` ---------------------
+
+    #[test]
+    fn ensure_action_ok_rejects_a_failed_write() {
+        // Explicit success and a reply without a verdict both pass.
+        assert!(ensure_action_ok("Xoá tin nhắn", "test::scope", &json!({ "error_code": 0 })).is_ok());
+        assert!(ensure_action_ok("Xoá tin nhắn", "test::scope", &json!({ "data": {} })).is_ok());
+
+        let err = ensure_action_ok(
+            "Xoá tin nhắn",
+            "test::scope",
+            &json!({ "error_code": 144, "error_message": "Không tìm thấy tin nhắn" }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            "Xoá tin nhắn thất bại (mã 144: Không tìm thấy tin nhắn)"
+        );
+
+        // Recall / friend-request actions use the same helper and keep their own wording.
+        for (action, code, expected) in [
+            ("Thu hồi tin nhắn", 5, "Thu hồi tin nhắn thất bại (mã 5)"),
+            (
+                "Huỷ lời mời kết bạn",
+                216,
+                "Huỷ lời mời kết bạn thất bại (mã 216)",
+            ),
+            (
+                "Từ chối lời mời kết bạn",
+                -102,
+                "Từ chối lời mời kết bạn thất bại (mã -102)",
+            ),
+        ] {
+            let err = ensure_action_ok(action, "test::scope", &json!({ "error_code": code }))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, expected);
+        }
     }
 }
