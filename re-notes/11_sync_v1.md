@@ -49,6 +49,21 @@ Ngày 2026-11-02. Phần B của `docs/dev/KE_HOACH_TIEP_THEO.md` §2, bước B
 
 - **[I]** `syncmsg_info` đến cùng đường với `transfer_after_login`, tức `603_1` hoặc `lp_control` (`controls[]`). Muốn QTzalo nhận được thì cần thêm một bộ lọc theo `act` cạnh `call::extract_voip_controls`. Giá trị `act_type` của các sự kiện này **[U]**.
 
+### Phía QTzalo (03/11/2026)
+
+- **[O]** Đã có bộ đọc: `src/call.rs::extract_transfer_events(data_node, pc_name, public_key)` →
+  `TransferEvent { act, thread_hint, user_action, status, error_code, temp_key_present, backup }`;
+  `BackupInfo` chỉ giữ **cấu trúc + độ dài** (`file_name_len`, `url_host` không query/token,
+  `checksum_present`, `encrypted_key_len`, `db_format`, `is_full_transfer`, `from_seq_id`,
+  `min_seq_id`, `pc_name_matches_session`, `public_key_matches_session`).
+- **[O]** Worker gọi hàm này trên cả hai đường (`zpw_ws` control frames và `lp_control`) và ghi một
+  dòng `TRANSFER {…}` vào `logs/voip.log` khi chạy `--dev` hoặc `ZALO_VOIP_LOG`; không gọi mạng,
+  không giải mã, không giữ giá trị nhạy cảm.
+- **Việc cần làm khi có bản chạy thật:** mở app `--dev`, bấm "Đồng bộ từ điện thoại" trên Zalo PC
+  chính thức (hoặc chờ sự kiện `transfer_after_login`), đọc dòng `TRANSFER` để chốt `act_type` và
+  xác nhận tên trường thật (`pc_name`, `public_key`, `user_action`, `status`, `error_code`,
+  `temp_key`, `db_format`, `is_full_transfer`) — tất cả đang là **[I]**.
+
 ## Việc tiếp theo
 
 - B3.3: phân tích `db-cross-v4-native.node` (exports, thư viện nén/mã hoá), có tính đến kiến trúc ia32.

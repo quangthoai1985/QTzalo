@@ -45,7 +45,24 @@ và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, ch
   *Hiển thị trạng thái hoạt động*; "Tổng số tin nhắn" → "Số tin đang hiển thị"; mục ảnh/video đã
   chia sẻ liệt kê cả video (bấm mở player) và đếm đúng; sidebar chỉ hiện dung lượng thật thay cho
   thanh % với mẫu số 1 GB cứng; bỏ hậu tố "· Đã nhận" khi không có dữ liệu đã đọc.
-- **Test:** 225 → **257** test qua (1 bỏ qua).
+- **Cài đặt trung thực:** 20 công tắc/ô chọn chưa được backend đọc (`autostart_on_boot`,
+  `remember_login`, `language`, các mục quyền riêng tư/lời mời, `quick_messages_enabled`,
+  `hidden_chat_pin_enabled`, `split_priority_inbox`, `excel_paste_mode`, `suggest_mentions`,
+  `enable_gif_search`, …) nay hiện **disabled** kèm chip "(sắp có)" và tooltip, thay vì bật/tắt
+  mà không có tác dụng. Các mục đang chạy thật giữ nguyên.
+- **Tin mã hoá đầu cuối (E2EE):** `chat::e2ee_placeholder_needed` nhận diện theo trường tường minh
+  (`e2eeStatus`/`e2ee`) và hiện bong bóng giữ chỗ *"[Tin nhắn mã hoá đầu cuối — xem trên điện thoại]"*
+  thay vì rác; không cố giải mã, không gọi mạng, tin thường không bị ảnh hưởng (có test chống hồi quy).
+  Đánh dấu **[I]**: tài khoản thật hiện có `e2eeStatus = 0` nên chưa có tin thật để kiểm chứng.
+- **Phần B (bước B3.2 phía mã):** `call::extract_transfer_events` đọc 4 sự kiện chuyển dữ liệu
+  (`user_confirm`, `transfer_error`, `syncmsg_info`, `transfer_after_login`) từ `controls[]`;
+  `BackupInfo` chỉ giữ **cấu trúc + độ dài** (không giữ URL có token, `encrypted_key`, `temp_key`),
+  và worker ghi cấu trúc đó vào `voip.log` khi `--dev` để thu bằng chứng `act_type` còn thiếu.
+  Chưa gọi `pull_mobile_msg`, chưa tải/giải mã file sao lưu.
+- **Nén cơ sở dữ liệu lịch sử:** `store::MessageStore::compact` (WAL checkpoint TRUNCATE + VACUUM,
+  **không xoá tin**) và `compact_if_needed`; gọi lúc khởi động khi DB vượt **32 MiB**
+  (`store::AUTO_COMPACT_MIN_BYTES`) — chống phình file/WAL như Zalo (`re-notes/12`).
+- **Test:** 225 → **265** test qua (1 bỏ qua).
 
 ### Sửa lỗi
 

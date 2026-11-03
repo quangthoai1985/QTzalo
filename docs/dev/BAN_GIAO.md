@@ -97,8 +97,37 @@ thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.m
   không áp được sang. Bước kế tiếp **bắt buộc cần Ghidra** (máy chưa có `dumpbin`/`objdump`):
   đọc bảng 4 con trỏ, hàm header `0x1AA00`, hàm crypto `0x25980` (KDF/mode/IV), wrapper nén
   `0x3F5F0`/`0x43350`, và xác nhận SHA-256 dùng cho check XZ hay KDF.
-- **Bài học phiên này:**
-  - Đọc lại mã nguồn bằng kiểm toán độc lập tìm ra 3 lỗi "âm thầm" mà test cũ không bắt: nạp tin cũ
+- **Đã sửa vòng 3 (Đợt 2 + Đợt 3 mở rộng):**
+  - **20 công tắc Cài đặt chưa có tác dụng** nay hiện `disabled` + chip "(sắp có)" + tooltip
+    (helper `soon_toggle`/`soon_switch`/`soon_choice`/`soon_radio` trong `gui/modals.rs`), giữ đủ mục
+    để thấy lộ trình nhưng không giả vờ hoạt động.
+  - **E2EE:** `chat::e2ee_placeholder_needed` (chỉ theo `e2eeStatus`/`e2ee` tường minh) +
+    bong bóng giữ chỗ; không giải mã, không gọi mạng; test chống hồi quy cho tin thường.
+  - **Phần B B3.2 phía mã:** `call::extract_transfer_events` (4 act, `BackupInfo` chỉ giữ cấu trúc +
+    độ dài, không giữ token/`encrypted_key`/`temp_key`); worker log cấu trúc vào `voip.log` khi `--dev`.
+    Đây là bộ đọc sẵn sàng để **thu bằng chứng `act_type`** khi người dùng chạy bản dev có trace.
+  - **SQLite:** `MessageStore::compact`/`compact_if_needed` (WAL checkpoint + VACUUM, không xoá tin),
+    tự chạy lúc khởi động khi DB > 32 MiB.
+  - Test: **265 pass / 1 ignored**; `cargo check --all-targets` 0 warning; MSRV 1.88 sạch;
+    `cargo audit` 0 lỗ hổng (2 unmaintained).
+- **Tồn đọng còn lại (ưu tiên giảm dần):**
+  1. Chưa ACK hàng đợi (`DELETE_QUEUE_ACK_*`) — cần bằng chứng thật, ACK sai mất tin.
+  2. Chưa có retention cho `messages`/`raw_json` (chỉ nén, không xoá — đúng ý người dùng).
+  3. `delete_message_for_me`/`recall_message` chưa chặn `msg.id` `out_*`/`local_*` (GUI đang chặn).
+  4. `threads_cache.json` vẫn ghi toàn bộ lịch sử mỗi vòng.
+  5. TUI chưa có cuộc gọi/reaction realtime; nav "Khác"/"Trò chuyện ẩn"/zCloud vẫn là "sắp có".
+  6. **Phần B:** đã có bộ đọc sự kiện transfer + bản đồ nhị phân `db-cross-v4`, nhưng chưa có
+     `pull_mobile_msg`/RSA/tải/giải mã; còn thiếu Ghidra để chốt header/KDF/cipher.
+- **Việc tiếp theo:** (a) chạy bản `--dev` với trace để thu `act_type` thật của 4 sự kiện transfer
+  (đây là dữ liệu duy nhất còn thiếu cho B6.2); (b) cài Ghidra, đọc 4 con trỏ N-API ở `0x103334`,
+  hàm header `0x1AA00`, crypto `0x25980`, wrapper nén `0x3F5F0`/`0x43350`; (c) sau đó mới viết
+  `sync_v1` bằng Rust. **Không** gọi `pull_mobile_msg` khi chưa hỏi người dùng (hành động thật trên
+  tài khoản, có nguy cơ khoá bảo mật).
+- **Bài học phiên này (bổ sung):** khi UI có 28 công tắc mà chỉ 8 cái có tác dụng, cách rẻ nhất để
+  trung thực là disable + nhãn "(sắp có)" thay vì xoá — vẫn giữ lộ trình và không phá cài đặt đã lưu.
+  Với E2EE, chỉ nhận diện theo trường tường minh; mọi suy đoán từ nội dung/độ dài đều có nguy cơ
+  biến tin thường thành placeholder.
+- **Bài học phiên này:**  - Đọc lại mã nguồn bằng kiểm toán độc lập tìm ra 3 lỗi "âm thầm" mà test cũ không bắt: nạp tin cũ
     nhất, video call thành audio, `status_msg` không render. Test xanh không có nghĩa là hành vi đúng
     nếu không có test cho đúng chiều dữ liệu.
   - Nhiều agent sửa song song thì phải chia theo **file** và giữ "điểm nối" (enum, hàm API) ở một người;
