@@ -1,15 +1,17 @@
 # Kế hoạch công việc tiếp theo — v0.1.2 và nghiên cứu Sync V1
 
 > Viết ngày 2026-11-01, sau khi phát hành v0.1.1 (`main` = `d8ba11c`, nghiên cứu ở `adc597f`).
-> **Cập nhật 2026-11-03 (đợt sửa lỗi kiểm toán):** đã làm xong **Đợt 0** (tài liệu + CI) và
-> **Đợt 1** (6 lỗi P0 + huỷ tải), cùng phần lớn **Đợt 2** (chính sách lỗi `chat.rs`, rollback cảm xúc,
-> dọn cache, fallback media). Kiểm chứng: 250 test pass / 1 bỏ qua, `cargo check --all-targets` 0 warning,
+> **Cập nhật 2026-11-03 (đợt sửa lỗi kiểm toán):** đã làm xong **Đợt 0** (tài liệu + CI), **Đợt 1**
+> (6 lỗi P0 + huỷ tải) và **Đợt 2** (chính sách lỗi `chat.rs` đủ 13/13 hành động ghi, rollback cảm xúc,
+> chỉ báo "đang nhập" thật, con trỏ `lp_control` bền, client tải luồng dài, dọn dữ liệu hiển thị giả,
+> nối 2 công tắc Cài đặt). Kiểm chứng: 257 test pass / 1 bỏ qua, `cargo check --all-targets` 0 warning,
 > MSRV 1.88 sạch, `cargo audit` 0 lỗ hổng. Chi tiết: `CHANGELOG.md` `[Unreleased]`,
 > `docs/dev/BAN_GIAO.md` §0b, `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md`.
-> **Việc còn lại của Đợt 2:** tách client tải khỏi `Session` (timeout 35 s), nối `reaction::rollback_mine`
-> vào GUI khi gửi cảm xúc lỗi, persist `CtrlPollState` (`lp_control`) vào `SyncState`, chỉ báo "đang nhập"
-> (socket `602` đã có, `call::extract_voip_controls` còn lọc bỏ), ẩn/nối các công tắc Cài đặt chết.
-> **Đợt 3 (Phần B) chưa bắt đầu:** bước kế tiếp vẫn là **B3.3**, xem §2 và ghi chú mới ở `BAN_GIAO.md` §0b.
+> **Còn lại của Đợt 2:** ~18 công tắc Cài đặt chưa có tác dụng (nối thật hoặc ẩn), retention/VACUUM cho
+> bảng `messages`, ACK hàng đợi, nhận diện E2EE, chặn id giả khi xoá/thu hồi.
+> **Đợt 3 (Phần B):** B3.3 đã có **bản đồ nhị phân** (`re-notes/13_db_cross_v4.md`) nhưng chưa viết được
+> Rust: cần Ghidra để đọc bảng 4 con trỏ N-API, hàm header `0x1AA00`, hàm crypto `0x25980`, wrapper nén
+> `0x3F5F0`/`0x43350`, và xác nhận SHA-256 dùng cho check XZ hay KDF.
 > **Cập nhật 2026-11-03:**
 > - v0.1.3 đã phát hành: thả cảm xúc khi rê chuột, reaction theo thời gian thực, đếm cộng dồn giống Zalo (`CHANGELOG.md`, `re-notes/10` §17–19). Việc này nằm ngoài kế hoạch: người dùng yêu cầu.
 > - **Phần B đang làm:** B3.1 và B3.2 đã xong (`re-notes/11_sync_v1.md`). **Việc tiếp theo là B3.3.** Script đọc `app.asar`: `scripts/re/asar_map.py`, `scripts/re/asar_snip.py`.

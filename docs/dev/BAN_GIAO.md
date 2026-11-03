@@ -45,7 +45,7 @@ thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.m
   - Huỷ tải: `CancelFlag` + `download_to_dir_with_cancel` + `WorkerCmd::CancelDownload` +
     `GuiEvent::{DownloadCancelled, VideoCancelled}` + `DownloadState::Cancelled`; nút Huỷ ở thẻ tệp/ảnh,
     pill ảnh, card video; tải lại được.
-  - Client tải vẫn dùng client 35 s của `Session` — **chưa tách** (xem tồn đọng).
+  - (vòng 2 đã sửa) client tải tách sang `Session::streaming_http()` — xem bên dưới.
   - TUI và nhánh đăng nhập mật khẩu dùng `SyncState` bền; TUI xoá `sync_state_<uin>.json` khi logout.
   - `call.rs` đọc `typeRequest` trước `type` ⇒ video call không bị đăng ký thành thoại.
   - `status_msg` được render ở thanh trạng thái dưới cửa sổ + toast cho lỗi gửi tin.
@@ -54,33 +54,49 @@ thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.m
   không còn là "hết tin"; `reaction.rs` có API rollback + hàng đợi sự kiện cho tin chưa nạp;
   `media.rs` dùng `video::find_ffmpeg`, không gửi H.264 tổng hợp, không fallback loopback (đều opt-in);
   log signaling chỉ in khi dev; `paths::trim_cache_dir` dọn cache >30 ngày và cap 64 MiB lúc khởi động.
-- **Kiểm chứng:** `cargo test --locked` **250 pass / 0 fail / 1 ignored**; `cargo check --locked
+- **Kiểm chứng (vòng 1):** `cargo test --locked` **250 pass / 0 fail / 1 ignored**; `cargo check --locked
   --all-targets` 0 warning; `cargo +1.88 check --locked --all-targets` sạch; `cargo audit` 0 lỗ hổng,
   2 cảnh báo `unmaintained` (`audiopus_sys`, `ttf-parser`) như trước.
 - **Tài liệu/CI:** README + `KIEN_TRUC` + `CAI_DAT` + `HUONG_DAN_SU_DUNG` + `docs/README` sửa theo thực tế;
   CI thêm MSRV 1.88 và `cargo audit` vào job `test`, ghim Inno Setup `6.7.1`; thêm
   `re-notes/12_zalo-electron-va-dung-luong.md` (số đo thật: Zalo chiếm ~24,3 GB, 91,7 % là cache media;
   `%APPDATA%\QTzalo` 64,7 MB nhưng 98,4 % là `stickers_cache` chưa evict) và báo cáo kiểm toán.
+- **Đã sửa vòng 2 (hoàn tất Đợt 2):**
+  - `Session::streaming_http()` (không timeout tổng, `read_timeout` 60 s, dùng chung cookie jar) nay
+    được worker dùng cho tải đính kèm và video → hết rủi ro huỷ tệp lớn sau 35 s.
+  - **Chỉ báo "đang nhập" chạy thật:** `call::extract_typing_events` + `GuiEvent::Typing`, hết hạn 6 s,
+    tôn trọng công tắc `show_typing_indicator`; `double_click_to_reply` cũng đã có tác dụng.
+  - **`CtrlPollState` được lưu** trong `sync_state_<uin>.json` (**version 2**; file version 1 vẫn nạp
+    được và chỉ replay control một lần).
+  - **Rollback cảm xúc đã nối:** GUI chụp `snapshot_mine` trước khi gỡ và xử lý
+    `GuiEvent::ReactionFailed` bằng `rollback_mine`/`restore_mine` (sentinel uid `"0"` — xem bài học).
+  - **`chat.rs` đủ 13/13 hành động ghi kiểm envelope** (`ensure_action_ok`), gồm xoá phía tôi, thu hồi,
+    huỷ/từ chối lời mời kết bạn; link/quote kèm `error_message`.
+  - **Bỏ dữ liệu hiển thị không thật:** presence chỉ hiện khi bật, "Số tin đang hiển thị", mục media
+    liệt kê cả video, sidebar chỉ hiện dung lượng thật, bỏ "· Đã nhận".
+- **Kiểm chứng (vòng 2):** `cargo test --locked` **257 pass / 0 fail / 1 ignored**;
+  `cargo check --locked --all-targets` 0 warning; `cargo +1.88 check --locked --all-targets` sạch;
+  `cargo audit` 0 lỗ hổng, 2 cảnh báo `unmaintained` như trước.
 - **Tồn đọng còn lại (ưu tiên giảm dần):**
-  1. Tách client tải khỏi `Session` (timeout 35 s tổng cho cả body) — rủi ro với tệp lớn.
-  2. Nối `reaction::rollback_mine`/`snapshot_mine` vào GUI khi gửi cảm xúc thất bại (API đã có, chưa gọi).
-  3. Persist `CtrlPollState` (`lp_control`) vào `SyncState` — hiện vẫn `default()` mỗi lần chạy.
-  4. Chỉ báo "đang nhập": đã có socket `602` nhưng `call::extract_voip_controls` vẫn lọc bỏ;
-     cần bộ lọc `act_type == "typing"` + `GuiEvent` + wiring (UI đã có, nguồn dữ liệu chỉ demo).
-  5. ~20 công tắc Cài đặt chỉ lưu JSON, không có tác dụng; vài chỗ hiển thị dữ liệu không thật
-     ("Đang hoạt động", thanh dung lượng mẫu số 1 GB, "Đã nhận").
-  6. Không ACK hàng đợi (`DELETE_QUEUE_ACK_*`); không nhận diện E2EE (chưa có bong bóng giữ chỗ).
-  7. `GUI` vẫn chưa có tab "Đồng bộ từ điện thoại"; Phần B vẫn **0 dòng mã**.
-- **Việc tiếp theo:** Phần B bước B3.3 (định dạng `db-cross-v4`). Kết quả đọc byte tĩnh trong phiên này
-  (chi tiết ở báo cáo kiểm toán §4.1): file có **magic XZ** (`FD 37 7A 58 5A 00`) ⇒ nén LZMA/XZ;
-  header có MD5 của phần nén; có kiểm tra độ dài khoá từ `password`; module làm cả hai chiều và
-  **không** chứa SQLite (chỉ ghi ra file `.db`; lớp SQLCipher `uin` là tầng khác); nguồn là **một**
-  `main.cpp` MSVC, chỉ import KERNEL32/libnode/WSOCK32 (crypto tĩnh, đã strip symbol); chỉ có bản ia32.
-  Còn thiếu: layout header, KDF, cipher/mode, đơn vị nén, xác nhận lớp trong là SQLCipher.
-  Nên dịch ngược `Java_com_zing_zalo_db_BackupRestoreUtils_decodeFile`/`convertAndroidDbtoCross` trong
-  `libzalosqlite.so` trước (còn symbol, cùng họ mã), rồi mới tới Ghidra ia32.
-  **Lưu ý:** `apk/jadx-src/`, `apk/lib-arm64/`, `apk/resources-dump.txt`, `artifacts/asar/root/` đã
-  không còn trên đĩa; bản gốc vẫn còn (app.asar, `.node`, APKM) nên phải giải nén lại **ngoài repo**.
+  1. ~18 công tắc Cài đặt còn lại chỉ lưu JSON (autostart, language, quyền riêng tư, quick messages,
+     GIF, …) — hoặc nối thật, hoặc ẩn/ghi "sắp có". Chỉ `show_typing_indicator`,
+     `double_click_to_reply`, `show_online_status`, `download_dir`, chủ đề, sticker là có tác dụng.
+  2. Không ACK hàng đợi (`DELETE_QUEUE_ACK_*`); không nhận diện E2EE (chưa có bong bóng giữ chỗ).
+  3. `delete_message_for_me`/`recall_message` chưa chặn `msg.id` kiểu `out_*`/`local_*` (GUI đang chặn).
+  4. Bảng `messages` chưa có retention/VACUUM; `threads_cache.json` vẫn ghi toàn bộ mỗi vòng.
+  5. TUI chưa có cuộc gọi/reaction realtime (ngoài phạm vi các đợt này).
+  6. `GUI` vẫn chưa có tab "Đồng bộ từ điện thoại"; Phần B vẫn chưa có dòng mã nào (chỉ nghiên cứu).
+- **Việc tiếp theo:** Phần B bước B3.3 (định dạng `db-cross-v4`). Vòng 2 đã lập **bản đồ nhị phân**
+  trong `re-notes/13_db_cross_v4.md`: PE32 i386, ImageBase `0x10000000`, **chỉ 1 export**
+  `_register_addon_` @RVA `0x103334` chứa **bảng 4 con trỏ** (4 adapter N-API) → 4 hàm cần đọc;
+  import KERNEL32+WSOCK32+`napi_*` delay-load, **không** CryptoAPI/OpenSSL ⇒ crypto/nén tĩnh;
+  **XZ/LZMA** (magic @RVA `0x10586C`, hằng số liblzma 5.3.1alpha); **AES tự viết** (S-box+invSbox
+  @RVA `0x1048D8`); **MD5** cho toàn vẹn (IV lặp 3 chỗ trong `.text`); container **nhiều DB**
+  (mỗi hội thoại một DB); `parseBinNet` để lộ tên trường protobuf trùng schema `Sync2.Message`.
+  Bằng chứng âm quan trọng: PC **không** dùng layout/field của Android (`pwd_*`, `[ReadHeader]`) nên
+  không áp được sang. Bước kế tiếp **bắt buộc cần Ghidra** (máy chưa có `dumpbin`/`objdump`):
+  đọc bảng 4 con trỏ, hàm header `0x1AA00`, hàm crypto `0x25980` (KDF/mode/IV), wrapper nén
+  `0x3F5F0`/`0x43350`, và xác nhận SHA-256 dùng cho check XZ hay KDF.
 - **Bài học phiên này:**
   - Đọc lại mã nguồn bằng kiểm toán độc lập tìm ra 3 lỗi "âm thầm" mà test cũ không bắt: nạp tin cũ
     nhất, video call thành audio, `status_msg` không render. Test xanh không có nghĩa là hành vi đúng

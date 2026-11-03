@@ -30,7 +30,22 @@ và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, ch
 - **`src/reaction.rs`:** API rollback cho cảm xúc lạc quan (`rollback_mine`, `snapshot_mine`,
   `restore_mine`), hàng đợi sự kiện cảm xúc cho tin chưa nạp (`apply_deferred`) và log có giới hạn
   khi bỏ sự kiện — cảm xúc trên tin ngoài cửa sổ 200 tin không còn mất im lặng.
-- **Test:** 225 → **250** test qua (1 bỏ qua).
+- **Chỉ báo "đang nhập" có thật:** `call::extract_typing_events` đọc control `typing`/`typing_end`
+  từ socket `602` và `lp_control`; `GuiEvent::Typing` cập nhật `typing_indicators`, tự hết hạn sau
+  6 s và tôn trọng công tắc *Bạn sẽ thấy bạn bè đang soạn tin nhắn* (trước chỉ có dữ liệu demo).
+- **Con trỏ `lp_control` bền:** `CtrlPollState` (queue `603_1`/`604_0`) nay lưu trong
+  `sync_state_<uin>.json` (định dạng **version 2**, file version 1 vẫn nạp được và chạy lại
+  control một lần) — trước mỗi lần mở app phải tải lại toàn bộ control event.
+- **Huỷ cảm xúc khi gửi lỗi:** GUI chụp `snapshot_mine` trước khi gỡ, và `GuiEvent::ReactionFailed`
+  gọi `rollback_mine`/`restore_mine` để bong bóng trở về đúng trạng thái trước khi thả.
+- **Tải tệp/video dài:** thêm `Session::streaming_http()` — cùng cookie jar/UA/header với client API
+  nhưng **không** đặt timeout tổng, chỉ `read_timeout` 60 s; worker dùng nó cho tải đính kèm và video.
+- **Double-click trả lời** tôn trọng công tắc *Nhấp đúp để trả lời* (trước luôn bật).
+- **Bỏ dữ liệu hiển thị không thật:** dấu "Đang hoạt động"/"Trực tuyến" chỉ hiện khi bật
+  *Hiển thị trạng thái hoạt động*; "Tổng số tin nhắn" → "Số tin đang hiển thị"; mục ảnh/video đã
+  chia sẻ liệt kê cả video (bấm mở player) và đếm đúng; sidebar chỉ hiện dung lượng thật thay cho
+  thanh % với mẫu số 1 GB cứng; bỏ hậu tố "· Đã nhận" khi không có dữ liệu đã đọc.
+- **Test:** 225 → **257** test qua (1 bỏ qua).
 
 ### Sửa lỗi
 
@@ -44,6 +59,9 @@ và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, ch
   - gửi thẻ liên kết/trả lời thất bại trả lỗi thay vì âm thầm đổi thành tin văn bản;
   - trích dẫn tin chưa có mã máy chủ bị từ chối thay vì bịa `msgId` (`now - 1000`);
   - timeout long-poll không còn bị coi là "không có tin mới".
+- **Đủ 13/13 hành động ghi trong `chat.rs`** kiểm envelope qua một helper duy nhất
+  (`ensure_action_ok`): thêm xoá phía tôi, thu hồi, huỷ/từ chối lời mời kết bạn; thẻ liên kết và
+  trích dẫn trả kèm `error_message` của máy chủ; `get_group_history` ghi lại lỗi gốc trước khi fallback.
 - **Cuộc gọi video bị đăng ký thành thoại:** nhánh `401` đọc `typeRequest` trước `type`
   (`call::call_type_from_payload`), nên video call từ GUI gửi đúng loại.
 - **Âm thanh/video cuộc gọi:**
