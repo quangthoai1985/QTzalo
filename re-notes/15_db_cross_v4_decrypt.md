@@ -1,9 +1,7 @@
-# 15 — `db-cross-v4` (B3.3): layout header, KDF, thứ tự nén↔mã hoá
+# 15 — `db-cross-v4` (B3.3): layout header, KDF, thứ tự nén↔mã hoá, MD5, IV
 
-> **Ngày:** 2026-11-04. **Phạm vi:** phân tích **tĩnh** `db-cross-v4-native.node` (Zalo 26.10.20, `electron_x86`),
-> SHA-256 `0BAE75BB…28CFA27`. **Không chạy mã Zalo, không gọi mạng, không sửa file nào ngoài note này.**
-> **Công cụ:** `dumpbin.exe` VS18 (disasm 27,7 MB / 548.740 dòng) + script Python **ngoài repo** ở `%TEMP%\qtzalo_re\`.
-> **Nhãn:** `[O]` đọc trực tiếp · `[I]` suy luận có căn cứ · `[U]` chưa chứng minh. Không chứa khoá/dữ liệu người dùng.
+> **Ngày:** 2026-11-04. **Phạm vi:** phân tích **tĩnh** `db-cross-v4-native.node` (Zalo 26.10.20, `electron_x86`), SHA-256 `0BAE75BB…28CFA27`. **Không chạy mã Zalo, không gọi mạng, không sửa file nào ngoài note này.**
+> **Công cụ:** `dumpbin.exe` VS18 (disasm 27,7 MB / 548.740 dòng) + script Python **ngoài repo** ở `%TEMP%\qtzalo_re\`. **Nhãn:** `[O]` đọc trực tiếp · `[I]` suy luận có căn cứ · `[U]` chưa chứng minh. Không chứa khoá/dữ liệu người dùng.
 
 ## 0. Kết luận trong một bảng
 
@@ -12,9 +10,11 @@
 | Layout header | Magic 6 B + `u32 BE A` + `u32 BE xxh32` + `u32 BE nfile` + nfile × (u32 nameLen ≤128, name, u32 size ≤2e9) | `[O]` |
 | Hash của header | **XXH32 seed 0** trên `[14, A)` — **không phải MD5**, **không có MAC/chữ ký** | `[O]` |
 | KDF (nhánh `_V2`) | **Không biến đổi**: key = 32 byte đầu của `password` đã zero-pad vào buffer 256 B; không MD5/SHA/lặp | `[O]` |
-| Cipher + IV | AES-256-CBC, **IV = 16 byte 0**, PKCS#7; giải mã **tại chỗ theo chunk 64 KiB** | `[O]`/`[I]` |
+| Cipher + IV | AES-256-CBC; **IV = 16 byte 0 cho TỪNG chunk 64 KiB** (không nối tiếp giữa các chunk; CBC chỉ nối trong chunk) | `[O]` |
+| Padding | Chỉ **làm tròn độ dài lên bội số 16** để cấp buffer; **không có bước bỏ padding** ở đường giải mã; ghi ra đúng `inlen` byte | `[O]` |
 | Thứ tự | **Giải mã → parse header → giải nén**. V2: `0x1C0C0` rồi `0x1AE00`; V1 chỉ giải nén + MD5 (không AES) | `[O]` |
-| MD5; `0x29680` | MD5 cho **payload** (đọc 32 B hex, băm, format `%02x`, so sánh), **không** cho header. `0x29680` là **dead code** (0 xref, quét cả VA/RVA trong code + `.data`/`.rdata`) | `[O]`/`[I]` |
+| MD5 input | **Luồng nén** (buffer là INPUT của lzma), băm **sau** lời gọi decode trong mỗi vòng, **không** băm luồng đã giải nén | `[O]`/`[I]` |
+| `0x29680` | **Dead code** (0 xref: code + `.data`/`.rdata`, cả VA lẫn RVA) | `[O]` |
 
 ## 1. Layout header `[O]` (hàm parse `0x1AE00`, hàm mở/giải mã `0x1C0C0`)
 
@@ -43,10 +43,8 @@ băm vừa là vùng chứa `nfile` + entries.
 `v1 = P1+P2 = 0x24234428`, `v2 = P2 = 0x85EBCA77`, `v3 = seed = 0`, `v4 = −P1 = 0x61C8864F`.
 
 ```
-0001AED3: mov [ebp+FFFFFF70h],24234428h     ; v1 = PRIME32_1 + PRIME32_2
-0001AEDD: mov [ebp+FFFFFF74h],85EBCA77h     ; v2 = PRIME32_2
-0001AEE7: mov [ebp+FFFFFF78h],0             ; v3 = seed = 0
-0001AEF1: mov [ebp+FFFFFF7Ch],61C8864Fh     ; v4 = -PRIME32_1
+0001AED3/AEDD: 24234428h, 85EBCA77h         ; v1 = P1+P2, v2 = P2
+0001AEE7/AEF1: 0, 61C8864Fh                 ; v3 = seed = 0, v4 = -P1
 0001B02B: shr eax,0Fh / xor eax,edx         ; avalanche: h^=h>>15
 0001B030: imul ecx,eax,85EBCA77h            ; * PRIME32_2
 0001B03D: imul eax,eax,0C2B2AE3Dh           ; * PRIME32_3
@@ -58,76 +56,84 @@ Băm theo luồng **64 KiB/lần** (`push 10000h` @`0x1AEC8`; `malloc` @`0x1AF07
 update `0x12DA→0x1A980` @`0x1AF49`/`0x1AF81`) cho tới đủ `A−14` byte. **Hệ quả:** header **không có MAC**;
 `"invalid signature"` thực chất là *sai magic*. `re-notes/13` §11 để câu này `[U]` → nay `[O]`.
 
-## 3. KDF — **không biến đổi** `[O]` (nhánh `_V2`)
+## 3. KDF + IV `[O]` (nhánh `_V2`)
 
 `0x1C0C0` làm 3 bước: (1) `AES_set_params(ctx, 0x100)` = **AES-256** (`push 100h; lea ecx,[ctx]; call 0x1C5D`
-@`0x1C110–0x1C11B`, thunk → `0x267A0`); (2) `memset(buf256,0,0x100)` @`0x1C120–0x1C12E` rồi
-`memcpy(buf256, password.data, min(pw_len,0x100))` @`0x1C133–0x1C153`; (3) mỗi chunk giải mã gọi
-`0x2608 → 0x26B50`, trong đó key expansion đọc **chính buf256** và copy đúng **Nk·4 = 32 byte**:
+@`0x1C110–0x1C11B`); (2) `memset(buf256,0,0x100)` @`0x1C120–0x1C12E` rồi
+`memcpy(buf256, password.data, min(pw_len,0x100))` @`0x1C133–0x1C153`; (3) key expansion đọc **buf256** và copy
+đúng **Nk·4 = 32 byte**:
 
 ```
 00026BA8: push dword ptr [esp+28h]          ; key = buf256 (password zero-pad)
 00026BAC: call 10002306                     ; -> 0x27890 key expansion
 000278A9: mov esi,[ebx+4]                   ; Nk = 8 (AES-256)
 000278B7: lea ecx,[esi*4]                   ; 32
-000278D0: mov al,[ecx+ebp] / mov [ecx-1],al ; copy từng byte
-000278E4: cmp edx,eax / jl 0x278D0          ; lặp đúng 32 lần
-0001C161: xorps xmm0,xmm0                   ; IV = 0
-0001C164: movups [ebp-0x30],xmm0            ; 16 byte IV = 0, rồi push làm tham số
+000278E4: cmp edx,eax / jl 0x278D0          ; lặp đúng 32 lần (copy từng byte)
 ```
 
-Toàn `0x1C0C0` **không** có `call` tới MD5 (`0x29F20/0x2A050/0x2AF00`) hay SHA-256 (`0x453A0/0x45470`),
-cũng không có vòng lặp KDF ⇒ **[O] key = 32 byte đầu của password đã zero-pad** (password ngắn ⇒ phần còn lại = 0).
-KDF **không băm** — yếu, nhưng đúng asm. `[U]` file > 64 KiB: mỗi chunk dùng **cùng** IV 0 hay `0x26B50`
-tự nối chuỗi bên trong (chưa đọc hết vòng CBC `0x26BD0–0x26C0F`).
+Toàn `0x1C0C0` **không** có `call` MD5/SHA, không vòng lặp KDF ⇒ **key = 32 byte đầu của password zero-pad**.
+KDF **không băm**. **IV = 0 cho từng chunk** `[O]`: vùng IV `[ebp-0x30]` chỉ bị ghi 2 lần — zero hoá **trước**
+vòng lặp — và chỉ được đọc 1 lần mỗi vòng khi push làm tham số:
 
-## 4. Thứ tự nén ↔ mã hoá — **giải mã trước, giải nén sau** `[O]`
+```
+0001C161/0x1C164: xorps xmm0,xmm0 / movups [ebp-30h],xmm0   ; IV = 0 (trước vòng lặp)
+0001C1C1:         lea eax,[ebp-30h]                          ; push IV mỗi vòng lặp 0x1C1B0..0x1C24D
+```
+Quét toàn hàm: **không có lệnh nào khác ghi vào `[ebp-0x30]`** ⇒ chunk 2, 3… **khởi động lại CBC với IV = 0**,
+không nối tiếp ciphertext của chunk trước.
+
+## 4. Pad + CBC trong `0x26B50` `[O]`
+
+```
+00026B53/B73: div [esi+0Ch] -> paddedLen = ceil(inlen/16)*16; *arg5 = paddedLen
+00026BB1: memcpy(ivbuf, *arg4, 16)                 ; ivbuf = IV của caller
+00026BD0: push roundKeys / lea edi,[out+off] / add ebx(off) / push edi / push ebx
+00026BE1: call aes_decrypt_block(ctx, in+off, out+off, roundKeys)
+00026BF2: call xor_block                           ; out[off] ^= ivbuf
+00026BFC: call memcpy                              ; ivbuf = in[off]  <- nối ciphertext
+00026C01: add ebp,[esi+0Ch] / cmp ebp,[esp+20h] / jb 0x26BD0
+```
+⇒ CBC **liên tục bên trong** một lần gọi (ivbuf = ciphertext khối trước), nhưng mỗi chunk 64 KiB là một lần gọi
+mới với IV = 0. **Không có** bước kiểm/bỏ PKCS#7: vòng lặp chạy tới `paddedLen`, không có nhánh xử lý khối cuối;
+caller `0x1C0C0` lại ghi ra đúng `esi` byte (`push esi; push 1; push edi; call fwrite` @`0x1C1F3–0x1C1F7`)
+và chỉ kiểm magic ở chunk đầu (`cmp dword [edi],3442445Ah` @`0x1C208`). `[I]` nếu phía mã hoá dùng PKCS#7 thì
+chỉ đệm **một lần ở cuối file** (tổng độ dài là bội số 16), các byte đệm bị bỏ qua khi parse header.
+
+## 5. Thứ tự nén ↔ mã hoá — **giải mã trước, giải nén sau** `[O]`
 
 ```
 _V2 (0x665E→0x14380)                                   [O]
-  └─ 0x1BBF0 @0x1466E  "open(decrypt + parse)"
-       ├─ 0x1C0C0 @0x1BE5D  -> GIẢI MÃ AES-256-CBC TẠI CHỖ
-       │     ├─ 0x26B50 @0x1C1D4 -> aes_cbc(key=buf256, IV=0)
-       │     └─ kiểm magic "ZDB4.0" TRÊN CHUNK ĐÃ GIẢI MÃ @0x1C208
-       │        fseek(file,-n,SEEK_CUR) @0x1C1E8 rồi ghi đè @0x1C1F7  [I] (fwrite theo tham số)
-       └─ 0x1AE00 @0x1BE86  -> PARSE HEADER (bảng §1)
+  └─ 0x1BBF0 @0x1466E "open(decrypt+parse)": 0x1C0C0 @0x1BE5D (GIẢI MÃ AES-256-CBC TẠI CHỖ:
+       fread→decrypt→fseek(-n)→fwrite) rồi 0x1AE00 @0x1BE86 (PARSE HEADER, bảng §1)
 decompressAndDecryptDb / V1 (0x6299→0x13D10)           [O]
   └─ 0x16B80 @0x13F09 → 0x298F0 → 0x28470 @0x29920  -> GIẢI NÉN + MD5
 ```
+Bằng chứng: `0x1BBF0` gọi `0x1C0C0` **trước** (`0x1BE5D`), kiểm `test eax,eax; jns` @`0x1BE65`, rồi mới gọi
+`0x1AE00` (`0x1BE86`). **AES chỉ có một cửa vào**: `0x26B50` chỉ được gọi từ `0x1C1D4` ⇒ AES chỉ ở nhánh V2.
+`[U]` vì sao V1 vẫn bắt buộc `password` (`"Password can not empty. FAIL"` @`0x28510`) dù không dùng AES —
+V1 dùng một lớp **XOR 16 byte** (staging `[esp+0x2C8]`, `0x2B010` + `xorps` @`0x2896B–0x2899E`) chứ không phải AES.
 
-Bằng chứng thứ tự: `0x1BBF0` gọi `0x1C0C0` (`0x1BE5D`) **trước**, kiểm `test eax,eax; jns` @`0x1BE65`,
-rồi mới gọi `0x1AE00` (`0x1BE86`). **AES chỉ có một cửa vào**: `0x26B50` chỉ được gọi từ `0x1C1D4`
-(quét toàn `.text`), nên AES **chỉ tồn tại trong nhánh V2** `[O]`. ⇒ **V1 không giải mã**: không có AES
-trong chuỗi `0x28470` ở độ sâu 1–2; V1 chỉ mở `"rb"` (`push 10104BF4h` @`0x2853C`), đọc khối MD5, giải nén.
-`[U]` vì sao V1 vẫn bắt buộc password (`"Password can not empty. FAIL"` @`0x28510`) mà không dùng cho AES.
+## 6. MD5 băm cái gì `[O]`/`[I]`
 
-**`0x29680` là dead code** `[O]`: 162 lệnh, chứa `"Start decrypt file"`/`"Decryption sucess"`/`"Md5 not correct !"`,
-nhưng **0 xref** — đã quét `call` trực tiếp, imm32 dạng VA `0x1029680`, dạng `1029680h`, và `.data`/`.rdata`
-cho cả VA lẫn RVA. Vì vậy **không** dùng `0x29680` để suy thứ tự.
-
-## 5. MD5: payload, không phải header `[O]`/`[I]`
-
-Trong `0x28470` (**571 lệnh** — không phải 1.109 như `re-notes/14` ghi):
+Decode (`0x28470`): trong vòng lặp đọc 16 byte/lần (`fread` @`0x288B6`, `0x28B64`) thứ tự là:
 
 ```
-000285CE: call 0x2A050           ; MD5 init (ctx #1)
-000285F0: fread 4 byte           ; cmp eax,4  @0x285F8
-00028627: fread 32 byte          ; cmp eax,20h @0x2862F  <- 32 ký tự hex MD5
-000286A9: push 10104C4Ch         ; "MD5 read from encrypted file: %s\n"
-0002889A: call 0x2AF00           ; MD5 init (ctx #2)
-000288B6: fread 16 byte          ; cmp eax,10h
-00028B41/0x28B9B: call 0x2AF40   ; MD5 update
-00028BB0: push 10104CE4h ("%02x"); call 0x28ED0   ; format digest
-00028BCB: cmp esi,10h / jl 0x28BB0 ; 16 lần => hex 32 ký tự
-00028BD1: call 0x984F4             ; so sánh
+0x2893F: movups [esp+edi+34Ch],xmm0     ; ghép 16 byte vào buffer INPUT của lzma
+0x28983: call 0x2B010                  ; (1) tiến trạng thái khối
+0x28A44: call 0x33B80                  ; (2) decode: in=[esp+34Ch+edi] -> out=[esp+10360h]
+0x28A71: call 0x3B590                  ; (3) tiêu thụ output
+0x28B31/0x28B35: push len / lea eax,[esp+350h]   ; <- slot E+34Ch = buffer INPUT (nén)
+0x28B3D/0x28B41: push ctx / call 0x2AF40         ; (4) MD5Update(ctx, input_buf, len)
 ```
+Buffer `E+0x34Ch` chính là buffer được truyền làm **input** cho decode (`lea eax,[esp+358h]; add eax,edi`
+@`0x28A28–0x28A31`); buffer **output** `[esp+10360h]` (`0x28A37`) **không** được băm ở đâu.
+⇒ `[O]` MD5 **không** băm luồng đã giải nén; nó băm **luồng nén** (đã qua lớp XOR), cập nhật **sau** lời gọi decode
+trong cùng vòng. Corroboration phía nén: chuỗi `"MD5 canculate of compress file: %s"` (`0x1054C8`, xref duy nhất
+@`0x3AFB8` trong `0x3AC70`) — nơi đó format digest bằng `"%02x"` (`0x3AF9F`) rồi **XOR 0x21 byte** digest với key
+(`xorps`/`xor byte` @`0x3AFE0–0x3B022`) trước khi ghi. `[I]` vì vậy checksum = **MD5 của luồng nén**; `[U]` chưa rõ
+cách de-obfuscate 32 ký tự hex khi đọc lại (đọc ở `0x28627`, `cmp eax,20h` @`0x2862F`).
 
-⇒ `[O]` MD5 **không** tham gia header (header dùng XXH32); MD5 là **toàn vẹn payload**: file chứa sẵn 32 ký tự
-hex MD5, chương trình đọc, băm, format `"%02x"`, rồi so sánh. `[I]` dữ liệu băm là **luồng nén** (đọc từng khối
-16 B trong lúc giải nén), khớp `"MD5 canculate of compress file"` phía nén; `[U]` chưa chốt băm **nén hay đã giải nén**
-— cần đọc `0x286E0–0x28A40` (nơi gọi liblzma `0x2B010`, `0x33990`, `0x33B80`, `0x3B590`).
-
-## 6. Pseudocode Rust (đủ cho nhánh V2; chỗ `[U]` phải kiểm bằng file thật)
+## 7. Pseudocode Rust (nhánh V2; chỗ `[U]` phải kiểm bằng file thật)
 
 ```rust
 const MAGIC: &[u8; 6] = b"ZDB4.0";
@@ -136,53 +142,59 @@ fn parse_header(buf: &[u8]) -> Result<(Vec<Entry>, usize)> {          // [O] §1
     let a = u32::from_be_bytes(buf[6..10].try_into()?);              // [I] tổng dài header
     let expect = u32::from_be_bytes(buf[10..14].try_into()?);
     if xxh32(&buf[14..a as usize], 0) != expect { return Err(Error::ChecksumMismatch); }  // [O] §2
-    let nfile = u32::from_be_bytes(buf[14..18].try_into()?);         // [I] số file
+    let nfile = u32::from_be_bytes(buf[14..18].try_into()?);
     let (mut off, mut out) = (18usize, Vec::new());
     for _ in 0..nfile {
         let n = u32::from_be_bytes(buf[off..off + 4].try_into()?) as usize; off += 4;
-        if n > 128 { return Err(Error::NameTooLong); }               // [O] cmp 80h
+        if n > 128 { return Err(Error::NameTooLong); }
         let name = String::from_utf8_lossy(&buf[off..off + n]).into_owned(); off += n;
         let size = u32::from_be_bytes(buf[off..off + 4].try_into()?); off += 4;
-        if size > 2_000_000_000 { return Err(Error::FileTooLarge); } // [O] 77359400h
+        if size > 2_000_000_000 { return Err(Error::FileTooLarge); }
         out.push(Entry { name, size });
     }
     Ok((out, off))                                                   // [U] đuôi header sau entries
 }
 fn derive_key(password: &[u8]) -> [u8; 32] {                         // [O] §3: KHÔNG băm
-    let mut b = [0u8; 256];                                          // memset 0x100
-    let n = password.len().min(256);                                 // memcpy min(len,0x100)
+    let mut b = [0u8; 256];
+    let n = password.len().min(256);
     b[..n].copy_from_slice(&password[..n]);
-    b[..32].try_into().unwrap()                                      // 32 byte đầu = AES-256 key
+    b[..32].try_into().unwrap()
 }
-fn decrypt_in_place(file: &mut [u8], password: &[u8]) -> Result<()> { // [O] §4
-    let (key, iv) = (derive_key(password), [0u8; 16]);               // IV = 0   [U] multi-chunk
-    for chunk in file.chunks_mut(64 * 1024) {                        // 64 KiB/chunk
-        aes_256_cbc_decrypt_inplace(chunk, &key, &iv);               // AES-256-CBC, PKCS#7 unpad
+fn decrypt_in_place(file: &mut [u8], password: &[u8]) -> Result<()> { // [O] §3+§4
+    let key = derive_key(password);
+    for chunk in file.chunks_mut(64 * 1024) {                        // 64 KiB / chunk
+        let iv = [0u8; 16];                                          // [O] IV = 0 MỖI chunk
+        aes_256_cbc_decrypt(chunk, &key, &iv);                       // CBC nối trong chunk, KHÔNG unpad
     }
-    if &file[..6] != MAGIC { return Err(Error::InvalidSignature); }  // @0x1C208
+    if &file[..6] != MAGIC { return Err(Error::InvalidSignature); }
     Ok(())
-}
-// V2: decrypt_in_place -> parse_header -> (từng file) xz_decompress + verify_md5
-// V1: (không AES) read [u32][32-hex-md5][16B] -> xz_decompress -> MD5 so hex
+}// V2: decrypt_in_place -> parse_header -> (từng file) xz_decompress + verify_md5(luồng nén)
+// V1: (không AES) XOR 16B + xz_decompress; MD5 so với 32-hex đọc từ file
 ```
 
-`[U]` còn lại: (a) đuôi header; (b) CBC nhiều chunk có nối IV; (c) framing payload từng file; (d) MD5 băm nén hay đã giải nén.
+## 8. Đủ để viết Rust chưa?
 
-## 7. Cần sửa trong `re-notes/14` + cách xác minh `[U]`
+| Bước cho `decrypt(bytes, password)` | Trạng thái | Ghi chú |
+|---|---|---|
+| 1. Cắt 64 KiB/chunk, AES-256-CBC, **IV = 0 mỗi chunk** | **ĐỦ** `[O]` | đã có asm `0x26B50` + `0x1C0C0`; không unpad |
+| 2. KDF `key = password[..32]` zero-pad | **ĐỦ** `[O]` | không băm, không lặp |
+| 3. Parse header (`ZDB4.0`, u32 BE, xxh32 verify, entries) | **ĐỦ** `[O]` | cần crate `xxhash-rust` (xxh32 seed 0) hoặc tự viết |
+| 4. Xác định **payload từng file** trong container (vị trí/độ dài) | **THIẾU** `[U]` | header chỉ có `name` + `size`; chưa đọc hết phần sau entries |
+| 5. Giải nén XZ (liblzma) | **Một phần** `[I]` | container XZ `[I]`; memlimit/flags chưa đọc |
+| 6. MD5 verify (luồng nén) | **Một phần** `[O]`+`[U]` | biết phạm vi (input lzma) nhưng chưa rõ vị trí + de-obfuscate hex |
+| 7. (V1) lớp XOR 16 byte trước khi giải nén | **THIẾU** `[U]` | `0x2B010`/staging chưa đọc hết |
 
-**Sửa `re-notes/14`:** (1) `0x28470` = **571 lệnh** (không phải 1.109), `0x29680` = **162 lệnh** và là **dead code**
-⇒ bỏ khỏi sơ đồ; (2) kết luận (e) "chưa chứng minh" nay **đã chốt**: giải mã → parse → giải nén; (3) hash header là
-**XXH32 seed 0**, header **không có MD5**; (4) KDF: **key = 32 byte đầu của password zero-pad, không băm**;
-(5) `0x1C0C0` còn **giải mã tại chỗ** toàn file; (6) `0x3F9F0` là phía **ghi** header XZ (nén) — khớp `lzma_stream_header_encode`.
+**Kết luận cho quyết định của Lead:** module **`sync_v1` (chỉ `parse_header` + KDF)** đã **đủ căn cứ để viết ngay**
+(bước 2 và 3 `[O]`), có thể tự sinh test vector (tự dựng header + tự tính XXH32, không cần file thật).
+Phần `decrypt`/`decompress` **chưa nên viết** vì thiếu bước 4 và 7 — cần 1 file backup thật để đối chiếu.
 
-**Xác minh bằng file backup thật (khi người dùng đồng ý):** (1) lấy 1 file `format 1` + `privateKey` (64 hex) từ
-`syncmsg_info`, giải mã với `key = password.as_bytes()[..32]`; 6 byte đầu ra `"ZDB4.0"` ⇒ KDF đúng. (2) Nếu sai, thử
-`hex::decode(privateKey)[..32]`, `md5(password)`, `password.to_uppercase()[..32]`. (3) So `nfile`/entries với
-`list_files.size()` trong log Zalo để chốt `A`; (4) so 32 ký tự hex MD5 với `md5(compressed)` và `md5(decompressed)`
-để chốt `[U]` (d); (5) file > 64 KiB: thử chunk 2 với IV = 0 và với 16 byte cuối chunk 1.
+## 9. Còn thiếu + cách xác minh
 
-## 8. Phụ lục — tái lập
+`[U]` còn lại: (a) đuôi header sau entries; (b) framing payload từng file; (c) vị trí + cách de-obfuscate 32 hex MD5; (d) tham số liblzma (`lzma_stream`, memlimit, `LZMA_CONCATENATED`); (e) lớp XOR 16 byte của V1.
+**Xác minh bằng file thật:** (1) lấy 1 file `format 1` + `privateKey`, giải mã `key = password[..32]`, IV = 0 theo chunk — 6 byte đầu phải ra `"ZDB4.0"`; (2) nếu sai, thử `hex::decode(privateKey)[..32]`, `md5(password)`, `to_uppercase()[..32]`; (3) so `nfile`/entries với `list_files.size()` trong log Zalo để chốt `A`; (4) so 32 hex đọc ở offset 0x18 với `md5(compressed)`/`md5(decompressed)`; (5) file > 64 KiB: thử chunk 2 với IV = 0 (kỳ vọng đúng) và với 16 byte cuối chunk 1 (kỳ vọng sai) để xác nhận §3.
 
-`%TEMP%\qtzalo_re\`: `peutil.py` (PE + disasm theo **delta địa chỉ**), `follow.py`, `s15_events.py`, `s15_seq.py` (dump tuần tự, tự snap ranh giới lệnh), `s15_kdf.py`, `s15_callers.py`, `s15_aesmap.py`, `s15_flow.py`. Lệnh chính: `python s15_seq.py 0x1AE00 0x1B8BB` (header), `… 0x1C0C0 0x1C2D8` (decrypt), `… 0x27890 0x27A80` (key expansion), `python s15_callers.py` (đồ thị gọi). **Không** suy độ dài lệnh từ cột byte của dumpbin (bị cắt ở 6 byte).
+## 10. Phụ lục — tái lập
+
+`%TEMP%\qtzalo_re\`: `peutil.py` (PE + disasm theo **delta địa chỉ**), `s16_dump.py`, `s16_md5fam.py`, `s16_order2.py`, `s15_seq.py`, `s15_callers.py`; output `d16_open.txt`, `d16_cbc.txt`, `d16_md5.txt`, `d16_md5fam.txt`, `d16_md5order2.txt`. **Không** suy độ dài lệnh từ cột byte của dumpbin (bị cắt ở 6 byte).
 
 *Hết ghi chú 15.*
