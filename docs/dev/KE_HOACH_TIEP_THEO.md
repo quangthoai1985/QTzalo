@@ -11,10 +11,11 @@
 > **Còn lại của Đợt 2:** ACK hàng đợi (cần bằng chứng), retention cho `messages`/`raw_json` (chỉ nén,
 > không xoá), chặn id `out_*`/`local_*` khi xoá/thu hồi, `threads_cache.json` ghi toàn bộ mỗi vòng,
 > TUI chưa có cuộc gọi/reaction realtime.
-> **Đợt 3 (Phần B):** B3.3 đã có **bản đồ nhị phân** (`re-notes/13_db_cross_v4.md`); phía mã đã có bộ đọc
-> sự kiện transfer (`call::extract_transfer_events`, log cấu trúc khi `--dev`) để thu `act_type` thật.
-> Chưa viết được Rust cho `db-cross-v4`: cần Ghidra để đọc bảng 4 con trỏ N-API, hàm header `0x1AA00`,
-> hàm crypto `0x25980`, wrapper nén `0x3F5F0`/`0x43350`, và xác nhận SHA-256 dùng cho check XZ hay KDF.
+> **Đợt 3 (Phần B):** B3.3 đã có **bản đồ nhị phân** (`re-notes/13`) và **disassemble thật** bằng
+> `dumpbin` của VS Build Tools (`re-notes/14`): chốt 4 hàm N-API, magic header **`ZDB4.0`** (big-endian),
+> **AES-256 + PKCS#7**, **liblzma/XZ**; còn **[U]** KDF, layout header và thứ tự nén↔mã hoá. Phía mã đã
+> có bộ đọc sự kiện transfer (`call::extract_transfer_events`, log cấu trúc khi `--dev`) để thu
+> `act_type` thật; TUI đã nhận cảm xúc realtime qua `lp_control`.
 > **Cập nhật 2026-11-03:**
 > - v0.1.3 đã phát hành: thả cảm xúc khi rê chuột, reaction theo thời gian thực, đếm cộng dồn giống Zalo (`CHANGELOG.md`, `re-notes/10` §17–19). Việc này nằm ngoài kế hoạch: người dùng yêu cầu.
 > - **Phần B đang làm:** B3.1 và B3.2 đã xong (`re-notes/11_sync_v1.md`). **Việc tiếp theo là B3.3.** Script đọc `app.asar`: `scripts/re/asar_map.py`, `scripts/re/asar_snip.py`.

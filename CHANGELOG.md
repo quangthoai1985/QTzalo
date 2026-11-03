@@ -62,7 +62,15 @@ và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, ch
 - **Nén cơ sở dữ liệu lịch sử:** `store::MessageStore::compact` (WAL checkpoint TRUNCATE + VACUUM,
   **không xoá tin**) và `compact_if_needed`; gọi lúc khởi động khi DB vượt **32 MiB**
   (`store::AUTO_COMPACT_MIN_BYTES`) — chống phình file/WAL như Zalo (`re-notes/12`).
-- **Test:** 225 → **265** test qua (1 bỏ qua).
+- **TUI nhận cảm xúc theo thời gian thực:** vòng poll nền của TUI poll thêm `lp_control`
+  (`call::poll_controls`, chặn 4 s/lượt) với con trỏ lấy từ `sync_state_<uin>.json`, áp
+  `reaction::extract_events` → `apply_to_threads`; con trỏ được lưu theo cơ chế debounce sẵn có.
+  Trước đây TUI chỉ thấy cảm xúc sau khi nạp lại hội thoại.
+- **Chặn thao tác trên tin chưa có mã máy chủ:** `chat::delete_message_for_me`/`recall_message`
+  từ chối id rỗng/`out_*`/`local_*` kèm thông điệp tiếng Việt, thay vì gửi id vô nghĩa.
+- **Giảm ghi đĩa:** `chat::save_threads_cache` chỉ ghi khi nội dung thực sự đổi (so hash trong
+  process + kiểm file tồn tại), không còn serialize/ghi toàn bộ lịch sử mỗi vòng.
+- **Test:** 225 → **268** test qua (1 bỏ qua).
 
 ### Sửa lỗi
 
@@ -95,9 +103,12 @@ và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, ch
   `docs/CAI_DAT.md` (phiên bản 0.1.3), `docs/HUONG_DAN_SU_DUNG.md` (đủ tham số CLI), `docs/README.md`.
 - CI: thêm bước **MSRV 1.88** và **`cargo audit`** vào job `test` (audit fail khi có lỗ hổng, cảnh báo
   `unmaintained` không làm fail); ghim phiên bản Inno Setup (`6.7.1`) thay vì cài bản mới nhất.
-- Thêm `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md` (báo cáo kiểm toán đầy đủ) và
+- Thêm `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md` (báo cáo kiểm toán đầy đủ),
   `re-notes/12_zalo-electron-va-dung-luong.md` (vì sao Zalo Electron ổn định nhưng phình dung lượng,
-  số đo thật trên máy và bài học cho QTzalo).
+  số đo thật trên máy và bài học cho QTzalo), `re-notes/13_db_cross_v4.md` (bản đồ PE của module
+  `db-cross-v4`) và `re-notes/14_db_cross_v4_disasm.md` (disassemble bằng `dumpbin`: sửa địa chỉ
+  4 hàm N-API, chốt magic header **`ZDB4.0`** big-endian, **AES-256 + PKCS#7**, **liblzma/XZ**;
+  KDF và thứ tự nén↔mã hoá vẫn **[U]**).
 
 ## [0.1.3] - 2026-11-03
 

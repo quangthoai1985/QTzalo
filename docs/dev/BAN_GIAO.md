@@ -127,6 +127,40 @@ thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.m
   trung thực là disable + nhãn "(sắp có)" thay vì xoá — vẫn giữ lộ trình và không phá cài đặt đã lưu.
   Với E2EE, chỉ nhận diện theo trường tường minh; mọi suy đoán từ nội dung/độ dài đều có nguy cơ
   biến tin thường thành placeholder.
+- **Đã sửa vòng 4 (Đợt 2 nốt + B3.3 thực chất):**
+  - **TUI reaction realtime:** poll thêm `lp_control` (chặn 4 s/lượt) dùng con trỏ trong
+    `sync_state_<uin>.json`; áp cảm xúc qua `reaction::apply_to_threads`. TUI không mở WebSocket
+    nên cảm xúc chậm hơn GUI một nhịp poll.
+  - **Chặn id `out_*`/`local_*`** khi xoá/thu hồi (thông điệp tiếng Việt rõ) thay vì gửi id vô nghĩa.
+  - **`threads_cache.json` chỉ ghi khi nội dung đổi** (hash trong process + kiểm file tồn tại) ⇒ hết
+    write amplification mỗi vòng.
+  - **B3.3 có bước ngoặt:** tìm thấy `dumpbin.exe` của VS Build Tools (không cần Ghidra) ⇒
+    `re-notes/14` (159 dòng, 541.381 lệnh được parse): **chốt 4 hàm thật** (`getVersion=0x119A`,
+    `parseBinNet=0x1C35`, `decompressAndDecryptDb=0x6299`, `_V2=0x665E`; **sửa** kết luận sai của
+    `re-notes/13` về bảng con trỏ `0x103334`), **magic header `"ZDB4.0"`** + đọc **big-endian** + băm
+    luồng 64 KiB, **AES-256 + PKCS#7** (S-box chuẩn, `[I]` CBC), **liblzma tĩnh có XZ stream header**
+    (⇒ XZ, không phải raw LZMA2), SHA-256 thuộc liblzma (không phải KDF).
+    Còn **[U]**: KDF (`0x1C0C0` **không** gọi MD5/SHA, nghi password zero-pad), layout byte của header,
+    và thứ tự nén↔mã hoá (hàm giải mã `0x29680` không có call site trực tiếp).
+  - Test: **268 pass / 1 ignored**; `cargo check --all-targets` 0 warning; MSRV 1.88 sạch;
+    `cargo audit` 0 lỗ hổng (2 unmaintained).
+- **Tồn đọng còn lại (ưu tiên giảm dần):**
+  1. Chưa ACK hàng đợi (`DELETE_QUEUE_ACK_*`) — cần bằng chứng thật, ACK sai mất tin.
+  2. Chưa có retention cho `messages`/`raw_json` (chỉ nén, không xoá — đúng ý người dùng).
+  3. `delete_message_for_me`/`recall_message` vẫn fallback `cliMsgId = now` khi `ts <= 0` (nên chặn
+     như `quote_target_ids`).
+  4. TUI: chưa có cuộc gọi, chưa hiện "đang nhập"; nav "Khác"/"Trò chuyện ẩn"/zCloud vẫn "sắp có".
+  5. **Phần B:** đã có bộ đọc sự kiện transfer + bản đồ nhị phân + disassemble; nhưng chưa có
+     `pull_mobile_msg`/RSA/tải/giải mã, và **chưa chốt KDF + layout header**.
+- **Việc tiếp theo:** (a) đọc trọn `0x28470` (1.109 lệnh) + `0x29680` (287 lệnh) và tìm con trỏ hàm
+  gọi `0x29680` trong `.data` để chốt thứ tự nén↔mã hoá; (b) đọc `0x1AE00` từ `0x1AF30`→`0x1B8BB` để
+  lấy layout header byte chính xác; (c) đọc `0x27890` xem 32 byte khoá được nạp từ đâu (giải KDF).
+  Khi có đủ 3 thứ đó mới viết được `sync_v1/decrypt.rs`; **vẫn không** gọi `pull_mobile_msg` khi chưa
+  được người dùng đồng ý (hành động thật trên tài khoản).
+- **Bài học phiên này (bổ sung 2):** công cụ có sẵn trong toolchain đôi khi đủ mạnh — `dumpbin` của
+  VS Build Tools thay được Ghidra cho việc đọc hàm theo địa chỉ. Khi dumpbin cắt cột byte ở 6 byte,
+  phải suy độ dài lệnh từ **địa chỉ dòng kế tiếp**, nếu không sẽ lệch và bỏ sót lệnh (đã làm hỏng
+  một vòng phân tích trước khi phát hiện).
 - **Bài học phiên này:**  - Đọc lại mã nguồn bằng kiểm toán độc lập tìm ra 3 lỗi "âm thầm" mà test cũ không bắt: nạp tin cũ
     nhất, video call thành audio, `status_msg` không render. Test xanh không có nghĩa là hành vi đúng
     nếu không có test cho đúng chiều dữ liệu.

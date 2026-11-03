@@ -24,6 +24,7 @@ Tài liệu cho người dùng và người phát triển QTzalo (`zalo-rust`).
 | [../re-notes/](../re-notes/) | Ghi chú reverse-engineering giao thức (đăng nhập, dữ liệu chat, cuộc gọi). |
 | [re-notes/12](../re-notes/12_zalo-electron-va-dung-luong.md) | Vì sao Zalo PC (Electron) ổn định nhưng phình dung lượng: số đo thật trên máy và bài học cho QTzalo. |
 | [re-notes/13](../re-notes/13_db_cross_v4.md) | Bản đồ nhị phân `db-cross-v4` (Phần B, B3.3): PE32 ia32, export ẩn sau `_register_addon_`, XZ/LZMA, AES tự viết, MD5, container nhiều DB, tên trường protobuf. |
+| [re-notes/14](../re-notes/14_db_cross_v4_disasm.md) | Disassemble `db-cross-v4` bằng `dumpbin`: địa chỉ 4 hàm N-API, magic header `ZDB4.0`, AES-256 + PKCS#7, liblzma/XZ; KDF và thứ tự nén↔mã hoá còn mở. |
 
 ## Build và chạy nhanh
 
