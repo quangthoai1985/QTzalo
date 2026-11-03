@@ -50,6 +50,8 @@ Tài liệu mô tả cách phân tách luồng xử lý, tổ chức module giao
 - `src/gui/workspace.rs`: Bố cục 3 cột gồm thanh điều hướng, danh sách hội thoại, vùng khung chat chính và ngăn thông tin chi tiết bên phải.
 - `src/gui/messages.rs`: Hiển thị bong bóng tin nhắn, nhãn dán, thẻ cuộc gọi, trích dẫn, cảm xúc (reaction), menu chuột phải và xử lý dán ảnh từ clipboard.
 - `src/gui/modals.rs`: Các cửa sổ phụ gồm cài đặt, cuộc gọi thoại/video, xem ảnh phóng to, chuyển tiếp tin nhắn, tìm kiếm theo số điện thoại và Dev Inspector.
+- `src/gui/media_view.rs`: Cửa sổ media riêng của app (từ 0.1.2) — phát video trong cửa sổ "Video" bằng `ffmpeg` (tải vào `stickers_cache/videos/`, giải mã ra khung PPM + PCM, quản lý và dừng tiến trình con), xem ảnh phóng to. Không mở trình duyệt, không mở trình phát ngoài trừ khi thiếu `ffmpeg`.
+- `src/gui/demo.rs`: Dữ liệu mẫu offline cho chế độ `--demo` (dùng để chụp ảnh và kiểm thử giao diện). Không truy cập mạng, không đọc/ghi dữ liệu thật; constructor GUI bỏ qua session worker nên mọi lệnh gửi worker thành no-op.
 
 ---
 
@@ -70,3 +72,11 @@ Tài liệu mô tả cách phân tách luồng xử lý, tổ chức module giao
 
 1. **Snapshot JSON (`threads_cache.json`)**: Lưu danh sách hội thoại và các tin nhắn gần nhất để hiển thị ngay khi khởi động ứng dụng.
 2. **SQLite (`zalo_history.db`)**: Lưu trữ lâu dài toàn bộ tin nhắn theo bảng `messages(msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json)` có đánh chỉ mục trên `(thread_id, ts)`. Khi đồng bộ tin nhắn mới, hệ thống khử trùng theo `msg_id` và theo cặp `(text, is_outgoing, ts)` trong biên độ 5 giây.
+
+Ngoài `messages`, cơ sở dữ liệu còn có 3 bảng (2 bảng sau thêm ở bản 0.1.2):
+
+3. **`threads(thread_id, name, is_group, last_ts)`**: bản ghi rút gọn của danh sách hội thoại, dùng để dựng lại danh sách và hoạt động gần nhất khi mở app.
+4. **`missing_ranges(id, conv_id, from_ts, to_ts, reason, created_at, dismissed)`**: các khoảng thời gian mà app biết là có thể thiếu tin (máy chủ bỏ bớt hàng đợi, con trỏ bị reset). Đây là nguồn của banner "Tin nhắn chưa được đồng bộ đủ"; `conv_id = "*"` nghĩa là áp cho mọi hội thoại.
+5. **`thread_activity(thread_id, is_group, last_msg_id, updated_at)`**: hoạt động cuối của từng hội thoại theo `msg_id`, phục vụ việc xếp danh sách hội thoại giống điện thoại.
+
+Ba bảng `threads`, `missing_ranges`, `thread_activity` đều dùng câu lệnh tham số hoá (`params!`) khi ghi/đọc, không nối chuỗi SQL.

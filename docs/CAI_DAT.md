@@ -2,6 +2,8 @@
 
 Mọi bản dựng sẵn nằm tại [GitHub Releases](https://github.com/quangthoai1985/QTzalo/releases). Các file đều do GitHub Actions build trực tiếp từ mã nguồn của commit được ghi trong trang Release.
 
+Các lệnh dưới đây dùng phiên bản `0.1.3` làm ví dụ; hãy thay bằng số phiên bản trong tên file bạn tải về. Bản phát hành **không phải lúc nào cũng có đủ file cho mọi nền tảng**: macOS là best-effort (chỉ có `.dmg` khi job macOS của CI build xong), còn Windows và Linux là bắt buộc.
+
 ## 1. Kiểm tra file tải về (khuyến nghị)
 
 Mỗi Release có file `SHA256SUMS.txt`. So sánh mã băm trước khi chạy:
@@ -9,7 +11,7 @@ Mỗi Release có file `SHA256SUMS.txt`. So sánh mã băm trước khi chạy:
 Windows (PowerShell):
 
 ```powershell
-Get-FileHash .\QTzalo-0.1.0-setup-windows-x86_64.exe -Algorithm SHA256
+Get-FileHash .\QTzalo-0.1.3-setup-windows-x86_64.exe -Algorithm SHA256
 ```
 
 Linux / macOS:
@@ -50,7 +52,7 @@ Bộ cài chưa được ký số nên Windows có thể hiện *"Windows protec
 ### Ubuntu 22.04+ / Debian 12+ / Linux Mint 21+
 
 ```bash
-sudo apt install ./qtzalo_0.1.0_amd64.deb
+sudo apt install ./qtzalo_0.1.3_amd64.deb
 ```
 
 Chạy bằng lệnh `qtzalo` hoặc mở **QTzalo** từ menu ứng dụng. Gỡ bằng `sudo apt remove qtzalo`.
@@ -58,8 +60,8 @@ Chạy bằng lệnh `qtzalo` hoặc mở **QTzalo** từ menu ứng dụng. G�
 ### Các bản phân phối khác (Fedora, Arch, openSUSE, …)
 
 ```bash
-tar -xzf qtzalo-0.1.0-linux-x86_64.tar.gz
-cd qtzalo-0.1.0-linux-x86_64
+tar -xzf qtzalo-0.1.3-linux-x86_64.tar.gz
+cd qtzalo-0.1.3-linux-x86_64
 ./install.sh
 ```
 

@@ -1,7 +1,7 @@
 ; QTzalo — Windows installer (Inno Setup 6).
 ;
 ; Build (from the repository root, after `cargo build --release --bin zalo-rust`):
-;   iscc /DMyAppVersion=0.1.0 packaging\windows\installer.iss
+;   iscc /DMyAppVersion=<phiên bản> packaging\windows\installer.iss
 ; CI passes the version read from Cargo.toml. Without /DMyAppVersion the installer is
 ; labelled 0.0.0 so a local build can never be mistaken for a release.
 ;

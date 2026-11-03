@@ -6,6 +6,10 @@ name: CI & Release
 #     (the tag `v<version>` is created by the release job at the built commit).
 #
 # Cargo.toml is the single source of truth for the version.
+#
+# Gating: a release is published only when `test` and `windows` succeed. The macOS job is
+# best-effort (`continue-on-error`), so it may be cancelled or fail and the whole run can still
+# end up red - that is expected and does not block a release. `linux` is optional for publishing.
 
 on:
   push:
@@ -72,7 +76,7 @@ jobs:
           echo "Version: ${version} — publish release: ${publish}"
 
   test:
-    name: Test (Linux)
+    name: Test, MSRV & audit (Linux)
     needs: prepare
     runs-on: ubuntu-22.04
     steps:
@@ -85,13 +89,25 @@ jobs:
       - name: Install system libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config \
+          sudo apt-get install -y --no-install-recommends build-essential cmake pkg-config libssl-dev \
             libasound2-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: test
       - name: cargo test
         run: cargo test --locked
+      - name: Install MSRV toolchain (1.88)
+        run: rustup toolchain install 1.88 --profile minimal --no-self-update
+      - name: Check MSRV (Rust 1.88)
+        # Cargo.toml declares rust-version = "1.88". Every other job uses the latest stable, so
+        # without this step the MSRV could regress silently.
+        run: cargo +1.88 check --locked --all-targets
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit (known vulnerabilities)
+        # Only known vulnerabilities fail the job. `unmaintained` warnings (currently audiopus_sys
+        # and ttf-parser, see docs/SECURITY_AUDIT.md S9) are printed but do not fail.
+        run: cargo audit
 
   windows:
     name: Windows (MSVC x64 + installer)
@@ -140,7 +156,14 @@ jobs:
           $iscc = Find-Iscc
           if (-not $iscc) {
             Write-Host "Inno Setup not found - installing via Chocolatey"
-            choco install innosetup -y --no-progress
+            # Pin the package version: the community Chocolatey package runs a maintainer script
+            # with elevated rights, so floating on "latest" would be an unpinned supply-chain input.
+            # 6.7.1 exists in the community feed
+            # (https://community.chocolatey.org/packages/innosetup/6.7.1 - verified 2026-11-03).
+            # TODO(supply-chain): Chocolatey verifies the package against its own feed, not against
+            # a digest we control. If that becomes unacceptable, replace this with a pinned Inno
+            # Setup installer downloaded over HTTPS and checked against a SHA-256 kept in the repo.
+            choco install innosetup --version=6.7.1 -y --no-progress
             $iscc = Find-Iscc
           }
           if (-not $iscc) { throw "ISCC.exe (Inno Setup 6) not found" }

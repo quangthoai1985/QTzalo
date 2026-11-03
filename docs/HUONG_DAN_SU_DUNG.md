@@ -11,12 +11,16 @@ Tài liệu tóm tắt các tùy chọn dòng lệnh, thao tác trên giao diệ
 | `--gui` | Chạy chế độ giao diện đồ họa (mặc định nếu không truyền tham số). | `zalo-rust --gui` |
 | `--tui` | Chạy chế độ giao diện dòng lệnh trong terminal. | `zalo-rust --tui` |
 | `--qr` | Yêu cầu tạo mã QR đăng nhập ngay khi khởi động TUI. | `zalo-rust --tui --qr` |
-| `--dev` | Bật thanh công cụ Dev Inspector để xem log mạng và payload giải mã. | `zalo-rust --gui --dev` |
+| `--dev`, `-v`, `--verbose` | Bật chế độ dev: thanh Dev Inspector để xem log mạng và payload, ghi log chẩn đoán vào `logs/`, và mở các biến môi trường chỉ dành cho dev (`ZCALL_WS`, `QTZALO_LP_QUEUES`…). | `zalo-rust --gui --dev` |
+| `--demo` | Mở giao diện với dữ liệu mẫu offline: không kết nối mạng, không đọc/ghi dữ liệu thật (bỏ qua cài đặt, cache hội thoại, lịch sử SQLite và bước chuyển dữ liệu cũ). Dùng để chụp ảnh và kiểm thử giao diện. | `zalo-rust --demo` |
 | `--logout` | Xóa phiên đăng nhập đã lưu (`session.json` trong thư mục dữ liệu) rồi thoát. Lịch sử tin nhắn được giữ lại. | `zalo-rust --logout` |
-| `--version` | In phiên bản rồi thoát. | `zalo-rust --version` |
+| `--version`, `-V` | In phiên bản rồi thoát. | `zalo-rust --version` |
 | `--phone <SỐ>` | Điền sẵn số điện thoại khi thử đăng nhập bằng mật khẩu. | `zalo-rust --tui --phone 0912345678` |
 | `--pass-stdin` | Đọc mật khẩu từ dòng đầu tiên của stdin (thay cho `--pass <MK>` đã bị bỏ vì làm lộ mật khẩu trong danh sách tiến trình). | `printf '%s\n' "$MK" \| zalo-rust --tui --phone 0912345678 --pass-stdin` |
-| `--dump` | Lưu các gói phản hồi JSON (đã che thông tin xác thực) ra thư mục `dump/` trong thư mục dữ liệu để phục vụ phân tích. | `zalo-rust --dump` |
+| `--iso <MÃ>` | Mã quốc gia dùng cho đăng nhập bằng mật khẩu; nếu không truyền thì hỏi, mặc định `VN`. | `zalo-rust --tui --phone 0912345678 --iso VN` |
+| `--v1` | Dùng luồng đăng nhập mật khẩu phiên bản 1 (`login_by_password_v1`) thay cho luồng mặc định. | `zalo-rust --tui --phone 0912345678 --v1` |
+| `-d`, `--dump` | Ghi mỗi phản hồi ra một file `dump/<số>-<slug>.json` (gồm `method`, `url`, `status`, `body`) trong thư mục dữ liệu. **URL** được che các tham số nhạy cảm (`params`, `zpw_sek`, `zpw_enk`, `token`, `signkey`, `imei`, `password`…) thành `<redacted>`, nhưng **body JSON được lưu nguyên văn** — hãy coi cả thư mục `dump/` là dữ liệu nhạy cảm. | `zalo-rust --dump` |
+| `--dump-raw` | Dùng **kèm** `--dump`: giữ nguyên URL đầy đủ (kể cả `params` đã mã hoá) ở cả file dump lẫn log ra màn hình, để tái hiện lỗi chữ ký (ví dụ `18022`). Chỉ truyền `--dump-raw` mà không có `--dump` thì không có file nào được ghi. Chỉ nên dùng với tài khoản thử. | `zalo-rust --dump --dump-raw` |
 
 ---
 

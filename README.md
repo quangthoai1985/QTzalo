@@ -45,7 +45,10 @@ Tải bản dựng sẵn tại **[GitHub Releases](https://github.com/quangthoai
 | Windows 10/11 x64 | `QTzalo-<phiên bản>-portable-windows-x86_64.exe` | Chạy trực tiếp, không cần cài |
 | Ubuntu 22.04+ / Debian 12+ | `qtzalo_<phiên bản>_amd64.deb` | `sudo apt install ./qtzalo_<phiên bản>_amd64.deb` |
 | Linux khác | `qtzalo-<phiên bản>-linux-x86_64.tar.gz` | Giải nén rồi chạy `./install.sh` (hoặc `./install.sh --user`) |
-| macOS (Apple Silicon) | `QTzalo-<phiên bản>-macos-arm64.dmg` | Bản thử nghiệm, chưa ký số |
+| macOS (Apple Silicon) | `QTzalo-<phiên bản>-macos-arm64.dmg` | Bản thử nghiệm, chưa ký số. **Không phải bản phát hành nào cũng có file này** — xem ghi chú bên dưới. |
+
+> [!NOTE]
+> Job macOS trong CI là **best-effort**: nếu job đó bị huỷ hoặc build lỗi thì bản phát hành vẫn được tạo nhưng **không kèm file `.dmg`** (v0.1.3 là một ví dụ như vậy). Khi thiếu `.dmg`, hãy tự build theo mục *Tự build từ mã nguồn* bên dưới.
 
 Hướng dẫn chi tiết, kể cả cách xử lý cảnh báo Windows SmartScreen: [docs/CAI_DAT.md](docs/CAI_DAT.md).
 
@@ -59,7 +62,7 @@ Hướng dẫn chi tiết, kể cả cách xử lý cảnh báo Windows SmartScr
 | Linux | `$XDG_DATA_HOME/qtzalo` (mặc định `~/.local/share/qtzalo`) |
 | macOS | `~/Library/Application Support/QTzalo` |
 
-Bên trong gồm `session.json` (phiên đăng nhập — **không chia sẻ file này**), `zalo_history.db` (lịch sử tin nhắn), `threads_cache.json`, `app_settings.json`, `stickers_cache/` (cache ảnh — xem dung lượng và xoá được trong *Cài đặt → Dữ liệu & làm mới*) và `logs/` (chỉ có khi bật chế độ `--dev`).
+Bên trong gồm `session.json` (phiên đăng nhập — **không chia sẻ file này**), `zalo_history.db` (lịch sử tin nhắn), `threads_cache.json`, `app_settings.json`, `sync_state_<uin>.json` (con trỏ đồng bộ theo từng tài khoản — chỉ ghi vị trí đã đọc của các hàng đợi tin nhắn, **không chứa khoá và không chứa nội dung tin**), `stickers_cache/` (cache ảnh — xem dung lượng và xoá được trong *Cài đặt → Dữ liệu & làm mới*) và `logs/` (chỉ có khi bật chế độ `--dev`).
 
 - Trên Linux/macOS, thư mục có quyền `0700` và file phiên có quyền `0600`.
 - Có thể đổi vị trí bằng biến môi trường `QTZALO_DATA_DIR`.
@@ -91,8 +94,10 @@ cargo build --release --locked
 Kết quả: `target\release\zalo-rust.exe`. Để tạo bộ cài giống bản phát hành, cài [Inno Setup 6](https://jrsoftware.org/isinfo.php) rồi chạy:
 
 ```powershell
-iscc /DMyAppVersion=0.1.0 packaging\windows\installer.iss
+iscc /DMyAppVersion=<phiên bản> packaging\windows\installer.iss
 ```
+
+`<phiên bản>` là `version` trong `Cargo.toml` (ví dụ `0.1.3`). Ở CI, workflow tự truyền giá trị này qua `/DMyAppVersion=$env:VERSION`. Nếu bỏ tham số, `installer.iss` dùng giá trị dự phòng `0.0.0` (không tự đọc `Cargo.toml`), nên khi đóng gói thủ công hãy truyền đúng số phiên bản.
 
 Bộ cài được tạo trong thư mục `dist\`.
 
@@ -161,12 +166,12 @@ Chi tiết phím tắt và thao tác: [docs/HUONG_DAN_SU_DUNG.md](docs/HUONG_DAN
 `Cargo.toml` là nguồn duy nhất của số phiên bản. Workflow [`ci-release.yml`](.github/workflows/ci-release.yml) đọc phiên bản từ đó cho mọi tên file, bộ cài và metadata.
 
 1. Tăng `version` trong `Cargo.toml` và cập nhật [CHANGELOG.md](CHANGELOG.md), `.github/release-notes.md`.
-2. Push lên GitHub, đợi CI xanh.
+2. Push lên GitHub và đợi **hai job `test` và `windows`** xanh. Chỉ hai job này quyết định việc phát hành; workflow có thể vẫn báo đỏ khi job `macos` (best-effort) bị huỷ, và trạng thái đỏ đó **không** chặn việc tạo release.
 3. Phát hành theo một trong hai cách:
    - Vào tab **Actions → CI & Release → Run workflow**, chọn nhánh, tick **release**, bấm Run. Workflow tự tạo tag `v<phiên bản>` tại commit vừa build.
    - Hoặc push tag `v<phiên bản>`. Tag phải khớp phiên bản trong `Cargo.toml`, nếu không workflow sẽ dừng với lỗi.
 
-Release chỉ được tạo khi job test và job Windows đều thành công. Job Linux và macOS không bắt buộc: file nào build được sẽ được đính kèm.
+Release chỉ được tạo khi job `test` và job `windows` đều thành công. Job `linux` và `macos` không bắt buộc: file nào build được sẽ được đính kèm, file nào thiếu thì bản phát hành không có. Vì vậy đừng đọc "workflow đỏ" là "phát hành hỏng" — hãy xem kết quả job `test` và `windows`.
 
 ---
 
@@ -174,6 +179,7 @@ Release chỉ được tạo khi job test và job Windows đều thành công. J
 
 - Chính sách báo cáo lỗ hổng và mô tả dữ liệu được lưu: [SECURITY.md](SECURITY.md).
 - Kết quả rà soát bảo mật và trạng thái khắc phục: [docs/SECURITY_AUDIT.md](docs/SECURITY_AUDIT.md).
+- Mỗi lần push, CI chạy `cargo test`, kiểm tra phiên bản Rust tối thiểu (`cargo +1.88 check --locked --all-targets`) và `cargo audit`: **lỗ hổng đã biết làm job đỏ**, còn cảnh báo `unmaintained` chỉ được ghi nhận (hiện là `audiopus_sys`, `ttf-parser`).
 - Bộ cài Windows **chưa được ký số**, nên SmartScreen có thể cảnh báo. Hãy kiểm tra SHA256 với `SHA256SUMS.txt` trong trang Release trước khi chạy.
 
 ---
@@ -182,9 +188,11 @@ Release chỉ được tạo khi job test và job Windows đều thành công. J
 
 ```text
 src/
-├── main.rs          # Điểm vào CLI: --gui, --tui, --dev, --logout, --version
+├── main.rs          # Điểm vào CLI: --gui, --tui, --demo, --dev, --logout, --version
+├── lib.rs           # Crate thư viện `zalo_rust`: khai báo toàn bộ module
 ├── paths.rs         # Thư mục dữ liệu theo người dùng, ghi file quyền riêng tư, chuyển dữ liệu cũ
 ├── timefmt.rs       # Định dạng giờ theo múi giờ của máy (chrono::Local)
+├── endpoints.rs     # Bảng phân bổ domain dịch vụ Zalo
 ├── session.rs       # Phiên, cookie zpw_sek, khoá phiên, bảng domain
 ├── crypto.rs        # AES-CBC, MD5, signkey
 ├── param_cipher.rs  # ParamCipher v2
@@ -192,14 +200,20 @@ src/
 ├── login.rs         # getServerInfo, getLoginInfo, đăng nhập mật khẩu
 ├── socket.rs        # WebSocket thời gian thực
 ├── chat.rs          # Hội thoại, tin nhắn, nhóm, đính kèm, link preview, sticker
+├── reaction.rs      # Cảm xúc (reaction): đọc sự kiện, đếm cộng dồn, áp vào hội thoại
+├── sync_state.rs    # Con trỏ đồng bộ bền theo tài khoản, tín hiệu thiếu tin, đồng hồ msgId → thời gian
+├── trace_shape.rs   # Trace giao thức chỉ in cấu trúc, không in nội dung tin
 ├── store.rs         # Lịch sử SQLite
+├── download.rs      # Chính sách tải tệp/ảnh/video: chỉ https, làm sạch tên, không ghi đè, Mark-of-the-Web
+├── video.rs         # Phát video trong app bằng ffmpeg (tham số cứng, whitelist protocol/format)
 ├── call.rs          # Báo hiệu cuộc gọi, ZRTP relay
 ├── media.rs         # RTP/RTCP, H.264, webcam/video
 ├── audio.rs         # Thu/phát âm thanh (cpal + opus)
 ├── voip_log.rs      # Log chẩn đoán RTP/RTCP (chỉ ở chế độ dev)
 ├── logger.rs        # Log mạng trong bộ nhớ cho Dev Inspector
+├── ui.rs            # Nhập liệu terminal: prompt, mật khẩu không hiện chữ
 ├── tui.rs           # Giao diện terminal (ratatui)
-└── gui/             # Giao diện desktop (eframe/egui)
+└── gui/             # Giao diện desktop (eframe/egui), gồm cả cửa sổ xem ảnh/phát video và dữ liệu mẫu `--demo`
 ```
 
 Tài liệu kỹ thuật khác nằm trong [docs/](docs/README.md).
