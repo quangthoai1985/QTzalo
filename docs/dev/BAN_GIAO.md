@@ -33,6 +33,62 @@
   5. Trace chỉ in cấu trúc thì không thấy những lỗi phụ thuộc vào **giá trị** (`gMsgID = 0`, `cMsgID` sai). Phải thêm dòng chẩn đoán tạm, chỉ in id/mã, mới thấy.
 - **Việc tiếp theo:** Phần B bước B3.3 (định dạng `db-cross-v4`), xem `KE_HOACH_TIEP_THEO.md` §2 và `re-notes/11`. Tồn đọng của 0.1.3 ở §8.
 
+## 0b. Sau v0.1.3 (03/11/2026) — đợt sửa lỗi kiểm toán, chưa phát hành
+
+Phiên này đọc toàn bộ mã nguồn, đối chiếu tài liệu và kho nghiên cứu, rồi sửa theo thứ tự đã
+thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md`. CHANGELOG: mục `[Unreleased]`.
+**Chưa tăng phiên bản, chưa commit/phát hành ở bước này của phiên** (xem §6 khi phát hành).
+
+- **Đã sửa (P0):**
+  - `store::messages_for` trả tin **mới nhất** (trước trả cũ nhất); thêm WAL/`busy_timeout`;
+    `delete_message` chỉ xoá đúng `msg_id`.
+  - Huỷ tải: `CancelFlag` + `download_to_dir_with_cancel` + `WorkerCmd::CancelDownload` +
+    `GuiEvent::{DownloadCancelled, VideoCancelled}` + `DownloadState::Cancelled`; nút Huỷ ở thẻ tệp/ảnh,
+    pill ảnh, card video; tải lại được.
+  - Client tải vẫn dùng client 35 s của `Session` — **chưa tách** (xem tồn đọng).
+  - TUI và nhánh đăng nhập mật khẩu dùng `SyncState` bền; TUI xoá `sync_state_<uin>.json` khi logout.
+  - `call.rs` đọc `typeRequest` trước `type` ⇒ video call không bị đăng ký thành thoại.
+  - `status_msg` được render ở thanh trạng thái dưới cửa sổ + toast cho lỗi gửi tin.
+- **Đã sửa (P1):** `chat.rs` kiểm `error_code` cho mọi sender, bỏ envelope giả, upload phần lỗi không
+  gửi tin, link/quote lỗi trả lỗi thay vì âm thầm gửi text, không bịa id trích dẫn, timeout long-poll
+  không còn là "hết tin"; `reaction.rs` có API rollback + hàng đợi sự kiện cho tin chưa nạp;
+  `media.rs` dùng `video::find_ffmpeg`, không gửi H.264 tổng hợp, không fallback loopback (đều opt-in);
+  log signaling chỉ in khi dev; `paths::trim_cache_dir` dọn cache >30 ngày và cap 64 MiB lúc khởi động.
+- **Kiểm chứng:** `cargo test --locked` **250 pass / 0 fail / 1 ignored**; `cargo check --locked
+  --all-targets` 0 warning; `cargo +1.88 check --locked --all-targets` sạch; `cargo audit` 0 lỗ hổng,
+  2 cảnh báo `unmaintained` (`audiopus_sys`, `ttf-parser`) như trước.
+- **Tài liệu/CI:** README + `KIEN_TRUC` + `CAI_DAT` + `HUONG_DAN_SU_DUNG` + `docs/README` sửa theo thực tế;
+  CI thêm MSRV 1.88 và `cargo audit` vào job `test`, ghim Inno Setup `6.7.1`; thêm
+  `re-notes/12_zalo-electron-va-dung-luong.md` (số đo thật: Zalo chiếm ~24,3 GB, 91,7 % là cache media;
+  `%APPDATA%\QTzalo` 64,7 MB nhưng 98,4 % là `stickers_cache` chưa evict) và báo cáo kiểm toán.
+- **Tồn đọng còn lại (ưu tiên giảm dần):**
+  1. Tách client tải khỏi `Session` (timeout 35 s tổng cho cả body) — rủi ro với tệp lớn.
+  2. Nối `reaction::rollback_mine`/`snapshot_mine` vào GUI khi gửi cảm xúc thất bại (API đã có, chưa gọi).
+  3. Persist `CtrlPollState` (`lp_control`) vào `SyncState` — hiện vẫn `default()` mỗi lần chạy.
+  4. Chỉ báo "đang nhập": đã có socket `602` nhưng `call::extract_voip_controls` vẫn lọc bỏ;
+     cần bộ lọc `act_type == "typing"` + `GuiEvent` + wiring (UI đã có, nguồn dữ liệu chỉ demo).
+  5. ~20 công tắc Cài đặt chỉ lưu JSON, không có tác dụng; vài chỗ hiển thị dữ liệu không thật
+     ("Đang hoạt động", thanh dung lượng mẫu số 1 GB, "Đã nhận").
+  6. Không ACK hàng đợi (`DELETE_QUEUE_ACK_*`); không nhận diện E2EE (chưa có bong bóng giữ chỗ).
+  7. `GUI` vẫn chưa có tab "Đồng bộ từ điện thoại"; Phần B vẫn **0 dòng mã**.
+- **Việc tiếp theo:** Phần B bước B3.3 (định dạng `db-cross-v4`). Kết quả đọc byte tĩnh trong phiên này
+  (chi tiết ở báo cáo kiểm toán §4.1): file có **magic XZ** (`FD 37 7A 58 5A 00`) ⇒ nén LZMA/XZ;
+  header có MD5 của phần nén; có kiểm tra độ dài khoá từ `password`; module làm cả hai chiều và
+  **không** chứa SQLite (chỉ ghi ra file `.db`; lớp SQLCipher `uin` là tầng khác); nguồn là **một**
+  `main.cpp` MSVC, chỉ import KERNEL32/libnode/WSOCK32 (crypto tĩnh, đã strip symbol); chỉ có bản ia32.
+  Còn thiếu: layout header, KDF, cipher/mode, đơn vị nén, xác nhận lớp trong là SQLCipher.
+  Nên dịch ngược `Java_com_zing_zalo_db_BackupRestoreUtils_decodeFile`/`convertAndroidDbtoCross` trong
+  `libzalosqlite.so` trước (còn symbol, cùng họ mã), rồi mới tới Ghidra ia32.
+  **Lưu ý:** `apk/jadx-src/`, `apk/lib-arm64/`, `apk/resources-dump.txt`, `artifacts/asar/root/` đã
+  không còn trên đĩa; bản gốc vẫn còn (app.asar, `.node`, APKM) nên phải giải nén lại **ngoài repo**.
+- **Bài học phiên này:**
+  - Đọc lại mã nguồn bằng kiểm toán độc lập tìm ra 3 lỗi "âm thầm" mà test cũ không bắt: nạp tin cũ
+    nhất, video call thành audio, `status_msg` không render. Test xanh không có nghĩa là hành vi đúng
+    nếu không có test cho đúng chiều dữ liệu.
+  - Nhiều agent sửa song song thì phải chia theo **file** và giữ "điểm nối" (enum, hàm API) ở một người;
+    đã có 2 lần build đỏ tạm thời vì enum mới chưa phủ match — chấp nhận được nhưng phải nói rõ thứ tự.
+  - `cargo` lock giữa các agent làm một lần chạy test trả exit 1 dù kết quả "ok"; phải đọc lại exit code.
+
 ## 0a. v0.1.2 (2026-11-02) — giữ lại để tham chiếu
 
 - **Phiên này chạy trên PC Windows của người dùng**, với tài khoản Zalo thật và điện thoại thật.

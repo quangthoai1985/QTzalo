@@ -4,6 +4,66 @@ Mọi thay đổi đáng chú ý của QTzalo được ghi tại đây. Định 
 
 QTzalo là bản fork của [ctdozlite](https://github.com/ctdoteam1110/ctdozlite), tách ra từ commit `73849bd` (tag `v0.0.2` của upstream).
 
+## [Unreleased]
+
+Trọng tâm: sửa các lỗi phát hiện trong đợt kiểm toán mã nguồn ngày 03/11/2026
+(`docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md`), làm cho lỗi gửi/nhận không còn bị coi là thành công,
+và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, chưa phát hành.**
+
+### Thêm mới
+
+- **Huỷ tải:** mọi tệp/ảnh/video đang tải đều có nút **Huỷ**.
+  - `src/download.rs`: `CancelFlag`, `CANCELLED_ERROR`, `download_to_dir_with_cancel`; vòng tải kiểm cờ
+    giữa các đoạn, xoá `.part` khi bị huỷ.
+  - `WorkerCmd::CancelDownload { url }` + sổ cờ theo URL trong worker;
+    `GuiEvent::DownloadCancelled`/`VideoCancelled`; `DownloadState::Cancelled` hiện "Đã huỷ tải · Tải lại".
+  - Card "Đang tải video…" nay thật sự dừng tiến trình tải (trước chỉ ẩn card).
+  - Dọn entry `Cancelled`/`Failed` cũ trong map tải về (giữ tối đa 64).
+- **Thanh trạng thái:** `status_msg` được render ở thanh dưới cửa sổ, nên mọi phản hồi của worker
+  (lỗi gửi, làm mới thất bại, mất mạng, lỗi cuộc gọi) không còn biến mất. Lỗi gửi tin có thêm toast.
+- **Dọn cache khi khởi động:** `paths::trim_cache_dir` xoá tệp cũ hơn 30 ngày rồi cắt bớt theo thứ tự
+  cũ nhất cho tới khi `stickers_cache/` ≤ 64 MiB. Zalo PC không dọn cache của nó (22 GB sau ~3 tháng,
+  `re-notes/12`), nên QTzalo đặt giới hạn ngay từ đầu.
+- **TUI dùng con trỏ bền:** `TuiApp` nạp/ghi `sync_state_<uin>.json` (debounce 2 s, lưu khi thoát,
+  xoá khi đăng xuất) — trước đây TUI luôn tải lại từ `lastActionId = 1`.
+- **GUI đăng nhập mật khẩu** nạp lại con trỏ đã lưu của tài khoản đó (trước chỉ nhánh QR làm việc này).
+- **`src/reaction.rs`:** API rollback cho cảm xúc lạc quan (`rollback_mine`, `snapshot_mine`,
+  `restore_mine`), hàng đợi sự kiện cảm xúc cho tin chưa nạp (`apply_deferred`) và log có giới hạn
+  khi bỏ sự kiện — cảm xúc trên tin ngoài cửa sổ 200 tin không còn mất im lặng.
+- **Test:** 225 → **250** test qua (1 bỏ qua).
+
+### Sửa lỗi
+
+- **Lịch sử nạp sai tin:** `store::messages_for` trả `limit` tin **mới nhất** (trước trả tin cũ nhất),
+  nên hội thoại > 200 tin hiển thị đúng sau khi khởi động lại.
+- **SQLite:** bật `journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL`; `delete_message` chỉ
+  xoá đúng `msg_id` (trước xoá mọi tin cùng `ts`).
+- **Gửi tin không còn "thành công giả"** (`src/chat.rs`):
+  - mọi hàm gửi đều đọc `error_code` (`send_reaction` trước đây bỏ qua);
+  - tải lên từng phần thất bại thì không gửi tin (trước `break` im lặng rồi vẫn gửi);
+  - gửi thẻ liên kết/trả lời thất bại trả lỗi thay vì âm thầm đổi thành tin văn bản;
+  - trích dẫn tin chưa có mã máy chủ bị từ chối thay vì bịa `msgId` (`now - 1000`);
+  - timeout long-poll không còn bị coi là "không có tin mới".
+- **Cuộc gọi video bị đăng ký thành thoại:** nhánh `401` đọc `typeRequest` trước `type`
+  (`call::call_type_from_payload`), nên video call từ GUI gửi đúng loại.
+- **Âm thanh/video cuộc gọi:**
+  - tìm `ffmpeg` qua `video::find_ffmpeg` (nhận bản WinGet), không còn chỉ dò `PATH`;
+  - không gửi khung H.264 tổng hợp khi không có frame camera (bật lại bằng `ZALO_CALL_FAKE_VIDEO=1`);
+  - không fallback loopback mic→loa của chính mình khi media lỗi (bật lại bằng `ZALO_CALL_LOOPBACK=1`),
+    thay vào đó báo lỗi rõ trong UI.
+- **Rò rỉ log:** payload signaling cuộc gọi đã giải mã chỉ được in khi `--dev`/`ZALO_CALL_TRACE=1`.
+
+### Tài liệu và CI
+
+- Sửa tài liệu theo thực tế: `README` (macOS best-effort, quy trình phát hành, `sync_state_<uin>.json`,
+  sơ đồ mã nguồn đủ 24 module), `docs/KIEN_TRUC_HE_THONG.md` (9 file `gui/`, 4 bảng SQLite),
+  `docs/CAI_DAT.md` (phiên bản 0.1.3), `docs/HUONG_DAN_SU_DUNG.md` (đủ tham số CLI), `docs/README.md`.
+- CI: thêm bước **MSRV 1.88** và **`cargo audit`** vào job `test` (audit fail khi có lỗ hổng, cảnh báo
+  `unmaintained` không làm fail); ghim phiên bản Inno Setup (`6.7.1`) thay vì cài bản mới nhất.
+- Thêm `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md` (báo cáo kiểm toán đầy đủ) và
+  `re-notes/12_zalo-electron-va-dung-luong.md` (vì sao Zalo Electron ổn định nhưng phình dung lượng,
+  số đo thật trên máy và bài học cho QTzalo).
+
 ## [0.1.3] - 2026-11-03
 
 Trọng tâm: thả cảm xúc ngay khi rê chuột, và thấy cảm xúc của mọi người theo thời gian thực. Bằng chứng thu với tài khoản thật: `re-notes/10_bang_chung_dong_bo.md` §17–18.

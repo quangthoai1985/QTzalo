@@ -1,6 +1,15 @@
 # Kế hoạch công việc tiếp theo — v0.1.2 và nghiên cứu Sync V1
 
 > Viết ngày 2026-11-01, sau khi phát hành v0.1.1 (`main` = `d8ba11c`, nghiên cứu ở `adc597f`).
+> **Cập nhật 2026-11-03 (đợt sửa lỗi kiểm toán):** đã làm xong **Đợt 0** (tài liệu + CI) và
+> **Đợt 1** (6 lỗi P0 + huỷ tải), cùng phần lớn **Đợt 2** (chính sách lỗi `chat.rs`, rollback cảm xúc,
+> dọn cache, fallback media). Kiểm chứng: 250 test pass / 1 bỏ qua, `cargo check --all-targets` 0 warning,
+> MSRV 1.88 sạch, `cargo audit` 0 lỗ hổng. Chi tiết: `CHANGELOG.md` `[Unreleased]`,
+> `docs/dev/BAN_GIAO.md` §0b, `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md`.
+> **Việc còn lại của Đợt 2:** tách client tải khỏi `Session` (timeout 35 s), nối `reaction::rollback_mine`
+> vào GUI khi gửi cảm xúc lỗi, persist `CtrlPollState` (`lp_control`) vào `SyncState`, chỉ báo "đang nhập"
+> (socket `602` đã có, `call::extract_voip_controls` còn lọc bỏ), ẩn/nối các công tắc Cài đặt chết.
+> **Đợt 3 (Phần B) chưa bắt đầu:** bước kế tiếp vẫn là **B3.3**, xem §2 và ghi chú mới ở `BAN_GIAO.md` §0b.
 > **Cập nhật 2026-11-03:**
 > - v0.1.3 đã phát hành: thả cảm xúc khi rê chuột, reaction theo thời gian thực, đếm cộng dồn giống Zalo (`CHANGELOG.md`, `re-notes/10` §17–19). Việc này nằm ngoài kế hoạch: người dùng yêu cầu.
 > - **Phần B đang làm:** B3.1 và B3.2 đã xong (`re-notes/11_sync_v1.md`). **Việc tiếp theo là B3.3.** Script đọc `app.asar`: `scripts/re/asar_map.py`, `scripts/re/asar_snip.py`.
