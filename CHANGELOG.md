@@ -4,7 +4,7 @@ Mọi thay đổi đáng chú ý của QTzalo được ghi tại đây. Định 
 
 QTzalo là bản fork của [ctdozlite](https://github.com/ctdoteam1110/ctdozlite), tách ra từ commit `73849bd` (tag `v0.0.2` của upstream).
 
-## [Unreleased]
+## [0.1.3] - 2026-11-03
 
 Trọng tâm: thả cảm xúc ngay khi rê chuột, và thấy cảm xúc của mọi người theo thời gian thực. Bằng chứng thu với tài khoản thật: `re-notes/10_bang_chung_dong_bo.md` §17–18.
 
@@ -221,7 +221,7 @@ Phiên bản đầu tiên của QTzalo.
 - Thêm `docs/CAI_DAT.md` (hướng dẫn cài đặt, xử lý SmartScreen), `docs/SECURITY_AUDIT.md` (kết quả rà soát), `SECURITY.md`.
 - Bổ sung `docs/KHAC_PHUC_SU_CO.md`: font, phiên đăng nhập, giờ hiển thị.
 
-[Unreleased]: https://github.com/quangthoai1985/QTzalo/compare/v0.1.2...HEAD
+[0.1.3]: https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.3
 [0.1.2]: https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.2
 [0.1.1]: https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.1
 [0.1.0]: https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.0

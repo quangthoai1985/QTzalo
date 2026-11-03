@@ -21,6 +21,7 @@ QTzalo là bản fork của dự án mã nguồn mở [ctdozlite](https://github
 
 - **Đăng nhập** bằng mã QR (quét và xác nhận trên điện thoại). Phiên đăng nhập được lưu trong thư mục dữ liệu riêng của người dùng, quyền chỉ chủ sở hữu đọc được.
 - **Nhắn tin thời gian thực** qua WebSocket (`zpw_ws`), dự phòng bằng HTTP polling: chat 1-1, nhóm, Cloud của tôi, trả lời trích dẫn, thả cảm xúc, ghim, thu hồi, xoá phía tôi.
+- **Thả cảm xúc khi rê chuột** giống Zalo: nút cạnh mỗi bong bóng, thanh 6 cảm xúc, đếm cộng dồn theo số lần bấm; cảm xúc của mọi người (và của bạn từ điện thoại) hiện theo thời gian thực.
 - **Tự bắt kịp tin nhắn khi mở app**: nhớ vị trí đã đồng bộ theo từng tài khoản, kéo đủ tin 1-1 và tin nhóm nhận trong lúc tắt máy, báo khi máy chủ đã bỏ bớt tin; danh sách hội thoại xếp theo hoạt động như trên điện thoại.
 - **Gửi/nhận** văn bản, hình ảnh (dán trực tiếp từ clipboard), tệp đính kèm, nhãn dán, xem trước liên kết.
 - **Gợi ý nhãn dán** theo từ khoá tiếng Việt khi đang gõ.

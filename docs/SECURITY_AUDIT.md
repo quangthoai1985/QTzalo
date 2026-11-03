@@ -58,6 +58,8 @@ Cột **Trạng thái** được cập nhật khi tích hợp bản sửa: `Đan
 | B11 | Tên nhóm luôn là "Nhóm <id>": `getmg-v2` được gửi đúng phiên bản máy chủ vừa đưa nên trả `unchangedsGroup`; tên thật bắt đầu bằng "Nhóm " bị coi là tên tạm và bị ghi đè. | — | `src/chat.rs` (`get_groups`, `is_generic_thread_name`) | Đã sửa (`58ea93f`) |
 | B12 | Long-poll lặp cùng một trang tin nhóm (`more = 1`) vì không theo dõi queue `16`; sau khi bỏ giới hạn 3 đợt thì thành khoảng 10 yêu cầu/giây. | — | `src/chat.rs` (`PollState::update_from_response`) | Đã sửa (`58ea93f`), trước khi phát hành |
 | B13 | Tin ảnh/video/tệp từ hàng đợi hiện thành link thô và mở trình duyệt. | — | `src/chat.rs` (`parse_chat_message`), `src/gui/messages.rs` | Đã sửa (`22d25cc`, `64fb9d5`) |
+| B14 | (0.1.3, tìm thấy với tài khoản thật) `lp_control` gửi lại toàn bộ `ids` của mọi queue trong URL; khi lần kéo đầu trả khoảng 150 id, mọi lần kéo sau bị máy chủ trả 413, nên mất sự kiện điều khiển cuộc gọi và reaction qua kênh này. | — | `src/call.rs` (`CtrlPollState::update_from_response`), `src/chat.rs` (`newest_action_ids`) | Đã sửa (`fc39dbf`) |
+| B15 | (0.1.3) Reaction trên tin của chính mình không khớp với điện thoại: Zalo định danh những tin này bằng `cliMsgId` (`gMsgID = 0`), còn QTzalo gửi `ts` và bỏ qua sự kiện. | — | `src/chat.rs` (`reaction_content`, `cli_msg_id`), `src/reaction.rs` | Đã sửa (`3200051`) |
 
 ## 3. Môi trường build đã kiểm chứng
 
@@ -68,4 +70,5 @@ Cột **Trạng thái** được cập nhật khi tích hợp bản sửa: `Đan
 | 1.97.0 (stable lúc rà soát) | `cargo build` + `cargo test` thành công (95 test qua, 1 bỏ qua) |
 | 1.88.0 — bản QTzalo 0.1.1 | `cargo +1.88 check --locked --all-targets` thành công (sau khi nâng ratatui 0.30) |
 | 1.97.0 — bản QTzalo 0.1.1 | `cargo test --locked`: 147 test qua, 1 bỏ qua; `scripts/check-windows.sh` sạch; `cargo audit`: 0 lỗ hổng, 2 cảnh báo hết bảo trì |
+| 1.99.1 — bản QTzalo 0.1.3 | `cargo test --locked`: 225 test qua, 1 bỏ qua; build MSVC trên PC sạch; `cargo +1.88 check --locked --all-targets` sạch; `cargo audit`: 0 lỗ hổng, 2 cảnh báo hết bảo trì |
 | 1.97.0 — bản QTzalo 0.1.0 | `cargo test --locked`: 123 test qua, 1 bỏ qua; `cargo check --target x86_64-pc-windows-gnu` sạch; CI Windows MSVC xanh |

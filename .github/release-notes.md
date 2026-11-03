@@ -16,15 +16,19 @@ Kiểm tra file bằng `SHA256SUMS.txt`. Bộ cài Windows chưa ký số: nếu
 
 ### Điểm mới
 
-![Đồng bộ tin nhắn khi mở QTzalo](https://raw.githubusercontent.com/quangthoai1985/QTzalo/v{{VERSION}}/docs/assets/qtzalo-sync.png)
+![Thả cảm xúc khi rê chuột](https://raw.githubusercontent.com/quangthoai1985/QTzalo/v{{VERSION}}/docs/assets/qtzalo-reactions.png)
 
-- **Tự bắt kịp tin nhắn khi mở app.** App nhớ vị trí đã đồng bộ của từng tài khoản, nên tắt máy một ngày rồi mở lại vẫn về đủ tin 1-1 và tin nhóm, chỉ lấy phần mới, có dải tiến trình "Đang đồng bộ tin nhắn… N tin". Khởi động lúc chưa có mạng thì tự thử lại.
-- **Báo thiếu tin:** nếu máy chủ đã bỏ bớt tin trong lúc tắt máy, app hiện banner kèm khoảng thời gian có thể thiếu.
-- **Danh sách hội thoại giống điện thoại:** chỉ hiện hội thoại có hoạt động, xếp theo thời điểm hoạt động cuối; ô tìm kiếm vẫn tìm được mọi bạn bè.
-- **Ảnh, video, tệp không còn hiện link.** Bấm ảnh mở cửa sổ xem ảnh riêng; bấm video phát trong cửa sổ của QTzalo (cần `ffmpeg`, nếu không có thì mở bằng trình phát mặc định); bấm tệp thì tải về rồi mở. Không còn mở trình duyệt.
-- **Sửa tên nhóm** hiện thành "Nhóm <số>"; sửa lỗi long-poll lặp liên tục khi có tin nhóm chờ.
-
-![Ảnh, video, tệp trong tin nhắn](https://raw.githubusercontent.com/quangthoai1985/QTzalo/v{{VERSION}}/docs/assets/qtzalo-media-cards.png)
+- **Thả cảm xúc khi rê chuột:**
+  - rê chuột vào tin nhắn thì hiện nút tròn cạnh bong bóng, bấm là thả 👍;
+  - dừng chuột trên nút để chọn 1 trong 6 cảm xúc; nút ✕ gỡ hết cảm xúc của bạn trên tin.
+- **Đếm cảm xúc giống Zalo:** mỗi lần bấm cộng thêm một, các cảm xúc khác nhau cộng dồn; rê lên chip để xem chi tiết.
+- **Cảm xúc theo thời gian thực:**
+  - cảm xúc của người khác, và của chính bạn thả từ điện thoại, hiện ngay;
+  - cảm xúc thả lúc QTzalo đang tắt được bù khi mở app.
+- **Sửa lỗi:**
+  - cảm xúc trên tin của chính bạn, gồm mọi tin trong "Cloud của tôi", nay khớp với điện thoại cả hai chiều;
+  - thả cảm xúc không còn xoá cảm xúc của người khác;
+  - kênh dự phòng cho sự kiện cuộc gọi (`lp_control`) không còn bị máy chủ từ chối liên tục với lỗi 413.
 
 Xem đầy đủ: [CHANGELOG.md](https://github.com/quangthoai1985/QTzalo/blob/v{{VERSION}}/CHANGELOG.md).
 
@@ -32,4 +36,6 @@ Xem đầy đủ: [CHANGELOG.md](https://github.com/quangthoai1985/QTzalo/blob/v
 
 - Dữ liệu người dùng nằm ở `%APPDATA%\QTzalo` (Windows) / `~/.local/share/qtzalo` (Linux). Lần đầu chạy, dữ liệu cũ trong thư mục làm việc được tự động chuyển vào đây.
 - Trên một máy vừa đăng nhập lần đầu, máy chủ Zalo chỉ gửi tin từ sau lần đăng nhập đó; lịch sử cũ (nhất là của nhóm) chưa lấy được. Tính năng "đồng bộ từ điện thoại" đang được nghiên cứu.
+- Cảm xúc được lưu theo dạng mới. Nếu quay lại bản 0.1.2, cache hội thoại sẽ bị bỏ qua; lịch sử trong SQLite vẫn còn.
+- Với tin **cũ** do bạn gửi trong hội thoại 1-1 trước bản này, cảm xúc thả từ điện thoại có thể chưa hiện trong QTzalo (thiếu `cliMsgId`). Tin mới không bị ảnh hưởng.
 - QTzalo không liên kết với VNG / Zalo. Dùng client bên thứ ba có thể vi phạm điều khoản dịch vụ của Zalo.
