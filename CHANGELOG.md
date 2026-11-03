@@ -6,9 +6,12 @@ QTzalo là bản fork của [ctdozlite](https://github.com/ctdoteam1110/ctdozlit
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-04
+
 Trọng tâm: sửa các lỗi phát hiện trong đợt kiểm toán mã nguồn ngày 03/11/2026
 (`docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md`), làm cho lỗi gửi/nhận không còn bị coi là thành công,
-và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, chưa phát hành.**
+giới hạn dung lượng cache trên đĩa, và mở Phần B (đồng bộ từ điện thoại) tới mức tối đa không cần
+dữ liệu người dùng.
 
 ### Thêm mới
 
@@ -342,6 +345,7 @@ Phiên bản đầu tiên của QTzalo.
 - Thêm `docs/CAI_DAT.md` (hướng dẫn cài đặt, xử lý SmartScreen), `docs/SECURITY_AUDIT.md` (kết quả rà soát), `SECURITY.md`.
 - Bổ sung `docs/KHAC_PHUC_SU_CO.md`: font, phiên đăng nhập, giờ hiển thị.
 
+[0.1.4]: https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.4
 [0.1.3]: https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.3
 [0.1.2]: https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.2
 [0.1.1]: https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.1

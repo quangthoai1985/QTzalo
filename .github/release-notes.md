@@ -16,26 +16,37 @@ Kiểm tra file bằng `SHA256SUMS.txt`. Bộ cài Windows chưa ký số: nếu
 
 ### Điểm mới
 
-![Thả cảm xúc khi rê chuột](https://raw.githubusercontent.com/quangthoai1985/QTzalo/v{{VERSION}}/docs/assets/qtzalo-reactions.png)
+Bản này là kết quả của đợt kiểm toán toàn bộ mã nguồn ngày 03/11/2026: sửa các lỗi "âm thầm" (thành công giả, lịch sử nạp sai), làm giao diện trung thực hơn và dọn dung lượng đĩa.
 
-- **Thả cảm xúc khi rê chuột:**
-  - rê chuột vào tin nhắn thì hiện nút tròn cạnh bong bóng, bấm là thả 👍;
-  - dừng chuột trên nút để chọn 1 trong 6 cảm xúc; nút ✕ gỡ hết cảm xúc của bạn trên tin.
-- **Đếm cảm xúc giống Zalo:** mỗi lần bấm cộng thêm một, các cảm xúc khác nhau cộng dồn; rê lên chip để xem chi tiết.
-- **Cảm xúc theo thời gian thực:**
-  - cảm xúc của người khác, và của chính bạn thả từ điện thoại, hiện ngay;
-  - cảm xúc thả lúc QTzalo đang tắt được bù khi mở app.
-- **Sửa lỗi:**
-  - cảm xúc trên tin của chính bạn, gồm mọi tin trong "Cloud của tôi", nay khớp với điện thoại cả hai chiều;
-  - thả cảm xúc không còn xoá cảm xúc của người khác;
-  - kênh dự phòng cho sự kiện cuộc gọi (`lp_control`) không còn bị máy chủ từ chối liên tục với lỗi 413.
-
-Xem đầy đủ: [CHANGELOG.md](https://github.com/quangthoai1985/QTzalo/blob/v{{VERSION}}/CHANGELOG.md).
+- **Lịch sử và gửi tin:**
+  - hội thoại dài hiển thị đúng tin **mới nhất** sau khi mở lại (trước đây nạp nhầm tin cũ nhất);
+  - gửi tin thất bại **không còn báo thành công**: mọi hành động ghi (gửi, thu hồi, xoá, cảm xúc, lời mời kết bạn…)
+    đều kiểm mã lỗi máy chủ và hiện lý do;
+  - tải tệp lên lỗi thì không gửi tin nữa; gửi link/trả lời lỗi trả lỗi thay vì âm thầm đổi thành tin văn bản;
+  - xoá/thu hồi dùng đúng `cliMsgId` của tin, không gửi id bịa.
+- **Tải tệp:** mọi tệp/ảnh/video đang tải đều có nút **Huỷ**; tệp lớn tải chậm không còn bị cắt sau 35 giây.
+- **Cảm xúc:** nếu gửi cảm xúc thất bại, bong bóng tự trở về trạng thái trước đó (trước đây lệch với máy chủ).
+- **"Đang nhập":** QTzalo hiện chỉ báo đang nhập của người khác (bật/tắt trong Cài đặt → Tin nhắn).
+- **Cài đặt trung thực:** 20 mục chưa có tác dụng nay hiện mờ kèm nhãn **(sắp có)** thay vì bật/tắt vô ích;
+  các mục đang chạy thật (thư mục tải, chủ đề, thông báo, nhấp đúp để trả lời, hiện trạng thái hoạt động…)
+  giữ nguyên.
+- **Bỏ dữ liệu hiển thị không thật:** dấu "Đang hoạt động"/"Trực tuyến" chỉ hiện khi bạn bật;
+  "Tổng số tin nhắn" đổi thành "Số tin đang hiển thị"; mục ảnh/video đã chia sẻ liệt kê cả video và mở được
+  trình phát; bỏ hậu tố "· Đã nhận" khi không có dữ liệu đã đọc.
+- **Dung lượng (áp dụng nghiên cứu Zalo PC):**
+  - tự dọn cache ảnh/video cũ hơn **30 ngày**, giữ tối đa **64 MiB**, ngay khi khởi động;
+  - tự nén cơ sở dữ liệu lịch sử khi vượt **32 MiB** (chỉ nén, **không xoá tin**);
+  - thêm nút **Dọn dẹp ngay** trong Cài đặt → Dữ liệu & làm mới.
+- **Tin nhắn mã hoá đầu cuối (E2EE):** nếu gặp, QTzalo hiện bong bóng giữ chỗ
+  *"Tin nhắn mã hoá đầu cuối — xem trên điện thoại"* thay vì hiển thị rác; không giải mã.
+- **TUI:** con trỏ đồng bộ được lưu bền và nhận cảm xúc theo thời gian thực qua `lp_control`.
 
 ### Lưu ý
 
 - Dữ liệu người dùng nằm ở `%APPDATA%\QTzalo` (Windows) / `~/.local/share/qtzalo` (Linux). Lần đầu chạy, dữ liệu cũ trong thư mục làm việc được tự động chuyển vào đây.
-- Trên một máy vừa đăng nhập lần đầu, máy chủ Zalo chỉ gửi tin từ sau lần đăng nhập đó; lịch sử cũ (nhất là của nhóm) chưa lấy được. Tính năng "đồng bộ từ điện thoại" đang được nghiên cứu.
-- Cảm xúc được lưu theo dạng mới. Nếu quay lại bản 0.1.2, cache hội thoại sẽ bị bỏ qua; lịch sử trong SQLite vẫn còn.
-- Với tin **cũ** do bạn gửi trong hội thoại 1-1 trước bản này, cảm xúc thả từ điện thoại có thể chưa hiện trong QTzalo (thiếu `cliMsgId`). Tin mới không bị ảnh hưởng.
+- `sync_state_<uin>.json` được nâng lên **định dạng 2** (thêm con trỏ `lp_control`). File định dạng 1 vẫn nạp được: QTzalo chỉ tải lại phần sự kiện điều khiển một lần, không mất lịch sử.
+- Trên một máy vừa đăng nhập lần đầu, máy chủ Zalo chỉ gửi tin từ sau lần đăng nhập đó; lịch sử cũ (nhất là của nhóm) chưa lấy được. Tính năng "đồng bộ từ điện thoại" vẫn đang được nghiên cứu (định dạng file sao lưu đã được phân tích, chưa có tính năng).
+- Bản này **chưa** thay đổi định dạng cache hội thoại hay cơ sở dữ liệu SQLite, nên quay lại 0.1.3 không mất dữ liệu.
 - QTzalo không liên kết với VNG / Zalo. Dùng client bên thứ ba có thể vi phạm điều khoản dịch vụ của Zalo.
+
+Xem đầy đủ: [CHANGELOG.md](https://github.com/quangthoai1985/QTzalo/blob/v{{VERSION}}/CHANGELOG.md).

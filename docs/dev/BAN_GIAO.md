@@ -1,7 +1,9 @@
-# Bàn giao dự án QTzalo — từ v0.1.3 sang bản tiếp theo
+# Bàn giao dự án QTzalo — từ v0.1.4 sang bản tiếp theo
 
 > Tài liệu này dành cho phiên làm việc (người hoặc AI) tiếp theo. Đọc hết trước khi sửa code.
-> Cập nhật lần cuối: 2026-11-03, khi phát hành v0.1.3. Mục 0 là phần mới; mục 0a giữ tóm tắt của v0.1.2; mục 1 trở đi giữ nội dung bàn giao của 0.1.1 và được sửa ở những chỗ đã thay đổi. Bản bàn giao trước xem lịch sử git của file này.
+> Cập nhật lần cuối: 2026-11-04, khi phát hành v0.1.4. Mục 0b là đợt kiểm toán đã phát hành thành
+> v0.1.4; mục 0 (0.1.3) và 0a (0.1.2) giữ tóm tắt cũ; mục 1 trở đi giữ nội dung bàn giao của 0.1.1
+> và được sửa ở những chỗ đã thay đổi. Bản bàn giao trước xem lịch sử git của file này.
 
 ## 0. v0.1.3 (2026-11-03) — tóm tắt cho phiên sau
 
@@ -33,11 +35,15 @@
   5. Trace chỉ in cấu trúc thì không thấy những lỗi phụ thuộc vào **giá trị** (`gMsgID = 0`, `cMsgID` sai). Phải thêm dòng chẩn đoán tạm, chỉ in id/mã, mới thấy.
 - **Việc tiếp theo:** Phần B bước B3.3 (định dạng `db-cross-v4`), xem `KE_HOACH_TIEP_THEO.md` §2 và `re-notes/11`. Tồn đọng của 0.1.3 ở §8.
 
-## 0b. Sau v0.1.3 (03/11/2026) — đợt sửa lỗi kiểm toán, chưa phát hành
+## 0b. Sau v0.1.3 (03/11/2026) — đợt sửa lỗi kiểm toán, đã phát hành **v0.1.4** (04/11/2026)
 
 Phiên này đọc toàn bộ mã nguồn, đối chiếu tài liệu và kho nghiên cứu, rồi sửa theo thứ tự đã
-thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md`. CHANGELOG: mục `[Unreleased]`.
-**Chưa tăng phiên bản, chưa commit/phát hành ở bước này của phiên** (xem §6 khi phát hành).
+thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md`. CHANGELOG: mục `[0.1.4]`.
+**Đã tăng phiên bản lên 0.1.4 và phát hành** (tag/run ghi ở mục "Phát hành v0.1.4" bên dưới).
+
+- **Phát hành v0.1.4:** `Cargo.toml` = `0.1.4`; `CHANGELOG.md` mục `[0.1.4] - 2026-11-04`;
+  `.github/release-notes.md` viết lại cho bản này; commit phát hành và tag do workflow tạo
+  (chi tiết tag/run xem lịch sử git của file này và trang Releases).
 
 - **Đã sửa (P0):**
   - `store::messages_for` trả tin **mới nhất** (trước trả cũ nhất); thêm WAL/`busy_timeout`;
