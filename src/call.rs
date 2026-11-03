@@ -104,6 +104,28 @@ pub fn ensure_call_target_allowed(
     bail!("Không xác định được người nhận cuộc gọi")
 }
 
+/// `typeRequest` of a `/api/voicecall/requestcall` (`401`) body (`1` audio, `3` video, `5`/`6` group).
+///
+/// The two `401` callers in this crate spell the key differently: `CallBridge` sends
+/// `typeRequest` (see `CallEngineCmd::MakeCall`), while `call_probe` — mirroring the captured
+/// official payload — sends `type`. Reading only one of them silently pinned every GUI dial to
+/// `1`, so a video call was registered as an audio call. Both spellings are accepted here; a
+/// missing/invalid value falls back to `1` (plain audio), which is what the old code did.
+pub fn call_type_from_payload(payload: &Value) -> i32 {
+    for key in ["typeRequest", "type"] {
+        let Some(v) = payload.get(key) else { continue };
+        if let Some(n) = v.as_i64() {
+            return n as i32;
+        }
+        if let Some(s) = v.as_str() {
+            if let Ok(n) = s.trim().parse::<i32>() {
+                return n;
+            }
+        }
+    }
+    1
+}
+
 /// Encrypt a JSON string into a `$`-terminated hex AES-128-CBC frame (`encrypt` in module `"vqv6"`).
 pub fn encrypt_pipe_frame(plain_json: &str) -> Result<String> {
     let bytes = plain_json.as_bytes();
@@ -383,6 +405,15 @@ pub fn call_trace_enabled() -> bool {
         || std::env::var("ZALO_CALL_TRACE").ok().as_deref() == Some("1")
 }
 
+/// Opt-in switch (`ZALO_CALL_LOOPBACK=1`) for the legacy mic→speaker loopback fallback.
+///
+/// Off by default: the loopback only echoes the local microphone to the local speakers, so the
+/// peer hears nothing while the user hears themselves. A failed media start is reported in the
+/// call UI instead (see `CallBridge`).
+fn loopback_fallback_enabled() -> bool {
+    std::env::var("ZALO_CALL_LOOPBACK").ok().as_deref() == Some("1")
+}
+
 /// Append a diagnostic line to `logs/call_trace.log` (per-user data dir) and mirror it to stderr.
 ///
 /// The trace contains decrypted signaling payloads (call ids, session ids, RTP addresses), so it
@@ -464,7 +495,8 @@ async fn dispatch_send_signal_inner(s: &Session, command: i64, n: &Value) -> Res
                     "calleeId": n.get("calleeId").cloned().unwrap_or(json!("")),
                     "callId": n.get("callId").cloned().unwrap_or(json!(0)),
                     "codec": n.get("codec").cloned().unwrap_or(json!("[]")),
-                    "typeRequest": n.get("type").cloned().unwrap_or(json!(1)),
+                    // `typeRequest` first (CallBridge), then `type` (official capture / call_probe).
+                    "typeRequest": call_type_from_payload(n),
                     "imei": s.imei,
                 })
             };
@@ -2221,9 +2253,28 @@ impl CallBridge {
                                             st.media = Some(m);
                                         }
                                         Err(e) => {
-                                            eprintln!("media start failed: {e}");
-                                            if let Ok(sess) = crate::audio::AudioHandle::start() {
-                                                st.audio = Some(sess);
+                                            // Loopback (mic -> own speakers) is not call audio:
+                                            // the peer hears nothing and the user hears themselves.
+                                            // Report the failure in the call UI; keep the old
+                                            // fallback only when ZALO_CALL_LOOPBACK=1.
+                                            crate::voip_log::line(
+                                                "CALL",
+                                                format!("answer media start failed: {e}"),
+                                            );
+                                            let _ = gui_tx_clone.send(GuiEvent::StatusUpdate(
+                                                "⚠️ Không mở được âm thanh cuộc gọi (micro/loa). Cuộc gọi vẫn tiếp tục nhưng không có tiếng.".into(),
+                                            ));
+                                            if loopback_fallback_enabled() {
+                                                match crate::audio::AudioHandle::start() {
+                                                    Ok(sess) => st.audio = Some(sess),
+                                                    Err(e) => {
+                                                        let _ = gui_tx_clone.send(
+                                                            GuiEvent::StatusUpdate(format!(
+                                                                "⚠️ Không mở được micro/loa: {e}"
+                                                            )),
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -2261,8 +2312,8 @@ impl CallBridge {
                                     req_402["subCommand"] = json!(3);
                                 }
                                 match dispatch_send_signal(&s_snap, 402, &req_402).await {
-                                    Ok(r) => eprintln!("[call] 402 answer resp: {}", r),
-                                    Err(e) => eprintln!("[call] 402 answer err: {e}"),
+                                    Ok(r) => trace_line("ANSWER", format!("402 resp: {r}")),
+                                    Err(e) => trace_line("ANSWER", format!("402 err: {e}")),
                                 }
                             }
                         });
@@ -2421,7 +2472,7 @@ impl CallBridge {
                                 egui_ctx.request_repaint();
                             }
                             "answer" | "group_answer" => {
-                                eprintln!("[call] ctrl answer raw: {}", voip_ctrl);
+                                trace_line("EVT", format!("ctrl answer raw: {voip_ctrl}"));
                                 let status = data
                                     .get("status")
                                     .and_then(|v| {
@@ -2543,10 +2594,24 @@ impl CallBridge {
                                                 st.media = Some(m);
                                             }
                                             Err(e) => {
-                                                eprintln!("media start failed: {e}");
-                                                if let Ok(sess) = crate::audio::AudioHandle::start()
-                                                {
-                                                    st.audio = Some(sess);
+                                                crate::voip_log::line(
+                                                    "CALL",
+                                                    format!("caller media start failed: {e}"),
+                                                );
+                                                let _ = gui_tx.send(GuiEvent::StatusUpdate(
+                                                    "⚠️ Không mở được âm thanh cuộc gọi (micro/loa). Cuộc gọi vẫn tiếp tục nhưng không có tiếng.".into(),
+                                                ));
+                                                if loopback_fallback_enabled() {
+                                                    match crate::audio::AudioHandle::start() {
+                                                        Ok(sess) => st.audio = Some(sess),
+                                                        Err(e) => {
+                                                            let _ = gui_tx.send(
+                                                                GuiEvent::StatusUpdate(format!(
+                                                                    "⚠️ Không mở được micro/loa: {e}"
+                                                                )),
+                                                            );
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -2687,7 +2752,15 @@ impl CallBridge {
                                         _ => None,
                                     })
                                     .unwrap_or_default();
-                                eprintln!("[call] incoming request call_id={} caller={} data={}", ev_call_id, caller_id, data);
+                                // Decrypted signalling (session id, uid, RTP addresses) must not
+                                // reach stderr in production; `trace_line` is dev-only.
+                                trace_line(
+                                    "EVT",
+                                    format!(
+                                        "incoming request call_id={} caller={} data={}",
+                                        ev_call_id, caller_id, data
+                                    ),
+                                );
                                 let caller_name = media
                                     .get("Dname")
                                     .or_else(|| data.get("Dname"))
@@ -3003,6 +3076,19 @@ mod tests {
         assert_eq!(CallType::from_flags(true, false) as u8, 3);
         assert_eq!(CallType::from_flags(false, true) as u8, 5);
         assert_eq!(CallType::from_flags(true, true) as u8, 6);
+    }
+
+    #[test]
+    fn call_type_payload_reads_type_request_then_type_then_defaults_to_audio() {
+        // `CallBridge` sends `typeRequest`; the official capture and `call_probe` send `type`.
+        assert_eq!(call_type_from_payload(&json!({ "typeRequest": 5 })), 5);
+        assert_eq!(call_type_from_payload(&json!({ "type": 5 })), 5);
+        assert_eq!(call_type_from_payload(&json!({})), 1);
+        // `typeRequest` wins when both are present (a video dial must not be pinned to 1).
+        assert_eq!(call_type_from_payload(&json!({ "typeRequest": 3, "type": 1 })), 3);
+        // Strings are accepted too, matching the loosely-typed official payload.
+        assert_eq!(call_type_from_payload(&json!({ "typeRequest": "6" })), 6);
+        assert_eq!(call_type_from_payload(&json!({ "typeRequest": "x", "type": 3 })), 3);
     }
 
     #[test]

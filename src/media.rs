@@ -73,7 +73,13 @@ fn enumerate_ffmpeg_cameras() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        let mut cmd = std::process::Command::new("ffmpeg");
+        // ffmpeg is discovered through `crate::video` (explicit override, PATH, WinGet, …) so the
+        // call stack and the in-app video player agree on which executable is used.
+        let Some(ffmpeg) = crate::video::find_ffmpeg() else {
+            eprintln!("media: ffmpeg not found — cannot enumerate cameras");
+            return Vec::new();
+        };
+        let mut cmd = std::process::Command::new(ffmpeg);
         cmd.args(["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"])
             .creation_flags(0x08000000);
         if let Ok(out) = cmd.output() {
@@ -98,7 +104,11 @@ fn enumerate_ffmpeg_cameras() -> Vec<String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let mut cmd = std::process::Command::new("ffmpeg");
+        let Some(ffmpeg) = crate::video::find_ffmpeg() else {
+            eprintln!("media: ffmpeg not found — cannot enumerate cameras");
+            return Vec::new();
+        };
+        let mut cmd = std::process::Command::new(ffmpeg);
         cmd.args(["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""]);
         if let Ok(out) = cmd.output() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -331,6 +341,16 @@ const ZALO_FRAG_INDICATOR: u8 = 0x1C;
 const RTP_MAX_PAYLOAD: usize = 1200;
 const ZALO_FRAG_BUF_MAX: usize = 1 << 20;
 const VIDEO_IDR_INTERVAL_FRAMES: u32 = 15;
+
+/// Publish a canned H.264 test pattern while no webcam frame is available.
+///
+/// Off by default: a video call without camera frames must send **no** video (the peer keeps its
+/// last frame) instead of a synthetic stream that makes a dead camera look alive. Set
+/// `ZALO_CALL_FAKE_VIDEO=1` to restore the synthetic stream (used by `src/bin/call_probe.rs` and
+/// for transport experiments).
+fn fake_video_enabled() -> bool {
+    std::env::var("ZALO_CALL_FAKE_VIDEO").ok().as_deref() == Some("1")
+}
 
 // Valid libx264-encoded H.264 Constrained Baseline (320x240, 15 fps) SPS/PPS/IDR/P-slice NAL units
 const H264_SPS: &[u8] = &[
@@ -755,6 +775,7 @@ fn spawn_camera_capture_thread(
         let mut child_opt: Option<std::process::Child> = None;
         let mut read_buf = [0u8; 8192];
         let mut stream_acc: Vec<u8> = Vec::with_capacity(65536);
+        let mut warned_no_ffmpeg = false;
 
         // Optional local preview decoder (`ffmpeg` H.264 -> 240x180 RGBA)
         let (prev_tx, prev_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(15);
@@ -795,7 +816,21 @@ fn spawn_camera_capture_thread(
                 current_dev = desired.clone();
                 stream_acc.clear();
 
-                let mut cmd = Command::new("ffmpeg");
+                // Same discovery as the in-app player (`crate::video::find_ffmpeg`); a PATH-only
+                // lookup missed WinGet installs, silently disabling the camera.
+                let Some(ffmpeg) = crate::video::find_ffmpeg() else {
+                    if !warned_no_ffmpeg {
+                        warned_no_ffmpeg = true;
+                        eprintln!("media: ffmpeg not found — webcam capture disabled");
+                        crate::voip_log::line(
+                            "VCAM",
+                            "ffmpeg not found; webcam capture disabled".to_string(),
+                        );
+                    }
+                    thread::sleep(Duration::from_millis(1000));
+                    continue;
+                };
+                let mut cmd = Command::new(ffmpeg);
                 cmd.args(["-hide_banner", "-loglevel", "error"]);
                 #[cfg(target_os = "windows")]
                 cmd.args([
@@ -934,7 +969,11 @@ fn run_local_preview_decoder(
     const PREV_H: usize = 180;
     const PREV_BYTES: usize = PREV_W * PREV_H * 4;
 
-    let mut cmd = Command::new("ffmpeg");
+    let Some(ffmpeg) = crate::video::find_ffmpeg() else {
+        eprintln!("media: ffmpeg not found — local camera preview disabled");
+        return;
+    };
+    let mut cmd = Command::new(ffmpeg);
     cmd.args([
         "-hide_banner",
         "-loglevel",
@@ -1317,6 +1356,11 @@ fn run_media_loop(
     let vid_ssrc = ssrc.wrapping_add(1);
     let mut nego_seq: u32 = 1;
     let mut last_cam_idr: Option<Vec<u8>> = None;
+    // Synthetic video is opt-in (`ZALO_CALL_FAKE_VIDEO=1`). With it off, a video call that has
+    // no camera frame publishes nothing and says so once (see the video block below).
+    let fake_video = fake_video_enabled();
+    let mut warned_no_video = false;
+    let mut last_no_video_note = std::time::Instant::now() - Duration::from_secs(10);
 
     while !stop.load(Ordering::Relaxed) {
         // --- Capture: take 320 samples (or emit comfort-noise every 20ms so peer never sees 0kbps) ---
@@ -1371,10 +1415,15 @@ fn run_media_loop(
             }
         }
 
-        // --- Video: synthetic H.264 stream (90 kHz clock, 15 fps) in the Zalo wire format ---
-        // One Annex-B access unit per frame: `PT 97` when it fits `RTP_MAX_PAYLOAD`, else `PT 98` fragments
-        // (see `packetize_zalo_au`); marker bit only on the last packet of the frame.
-        // A PLI/FIR from the peer (RTCP inbox, or RTP socket if the relay mixes them) forces an immediate SPS+PPS+IDR.
+        // --- Video: live webcam access unit in the Zalo Annex-B wire format (15 fps, 90 kHz) ---
+        // One Annex-B access unit per frame: `PT 97` when it fits `RTP_MAX_PAYLOAD`, else `PT 98`
+        // fragments (see `packetize_zalo_au`); marker bit only on the last packet of the frame.
+        // A PLI/FIR from the peer (RTCP inbox, or RTP socket if the relay mixes them) forces an
+        // immediate SPS+PPS+IDR.
+        //
+        // Without a camera frame there is nothing honest to publish: the old code sent a canned
+        // H.264 test pattern, so a dead camera still looked alive on the peer. That is now opt-in
+        // via `ZALO_CALL_FAKE_VIDEO=1`; by default no video RTP is sent.
         if (is_video || cam_enabled.load(Ordering::Relaxed))
             && last_video_tx.elapsed() >= Duration::from_millis(66)
         {
@@ -1393,82 +1442,91 @@ fn run_media_loop(
                 latest_cam_au = Some(au);
             }
 
-            let au_bytes: Vec<u8> = if cam_enabled.load(Ordering::Relaxed) {
-                if let Some(au) = latest_cam_au {
-                    if force_kf && !au_has_idr(&au) {
-                        if let Some(cached_idr) = &last_cam_idr {
-                            cached_idr.clone()
-                        } else {
-                            au
-                        }
-                    } else {
-                        au
+            // A cached IDR may stand in for a missing keyframe, never for a missing camera.
+            let live_au: Option<Vec<u8>> = if cam_enabled.load(Ordering::Relaxed) {
+                match latest_cam_au {
+                    Some(au) if force_kf && !au_has_idr(&au) => {
+                        last_cam_idr.clone().or(Some(au))
                     }
-                } else if let Some(cached_idr) = &last_cam_idr {
-                    if force_kf {
-                        cached_idr.clone()
-                    } else {
-                        let p_nal = H264_PSLICES[vid_gop_pos.min(H264_PSLICES.len() - 1)];
-                        vid_gop_pos = (vid_gop_pos + 1) % H264_PSLICES.len();
-                        annexb_au(&[p_nal])
-                    }
-                } else {
-                    let idr_nal = if (vid_idr_parity & 1) == 0 {
-                        H264_IDR
-                    } else {
-                        H264_IDR_ALT
-                    };
-                    let p_nal = H264_PSLICES[vid_gop_pos.min(H264_PSLICES.len() - 1)];
-                    if force_kf {
-                        vid_idr_parity = vid_idr_parity.wrapping_add(1);
-                        vid_gop_pos = 0;
-                        annexb_au(&[H264_SPS, H264_PPS, idr_nal])
-                    } else {
-                        vid_gop_pos += 1;
-                        annexb_au(&[p_nal])
-                    }
+                    other => other,
                 }
             } else {
-                let idr_nal = if (vid_idr_parity & 1) == 0 {
-                    H264_IDR
-                } else {
-                    H264_IDR_ALT
-                };
-                let p_nal = H264_PSLICES[vid_gop_pos.min(H264_PSLICES.len() - 1)];
-                if force_kf {
-                    vid_idr_parity = vid_idr_parity.wrapping_add(1);
-                    vid_gop_pos = 0;
-                    annexb_au(&[H264_SPS, H264_PPS, idr_nal])
-                } else {
-                    vid_gop_pos += 1;
-                    annexb_au(&[p_nal])
+                None
+            };
+
+            let au_bytes: Option<Vec<u8>> = match live_au {
+                Some(au) => Some(au),
+                None if fake_video => {
+                    // Synthetic test pattern (opt-in): cached IDR when available, canned NALs otherwise.
+                    if let Some(cached_idr) = &last_cam_idr {
+                        if force_kf {
+                            Some(cached_idr.clone())
+                        } else {
+                            let p_nal = H264_PSLICES[vid_gop_pos.min(H264_PSLICES.len() - 1)];
+                            vid_gop_pos = (vid_gop_pos + 1) % H264_PSLICES.len();
+                            Some(annexb_au(&[p_nal]))
+                        }
+                    } else {
+                        let idr_nal = if (vid_idr_parity & 1) == 0 {
+                            H264_IDR
+                        } else {
+                            H264_IDR_ALT
+                        };
+                        let p_nal = H264_PSLICES[vid_gop_pos.min(H264_PSLICES.len() - 1)];
+                        if force_kf {
+                            vid_idr_parity = vid_idr_parity.wrapping_add(1);
+                            vid_gop_pos = 0;
+                            Some(annexb_au(&[H264_SPS, H264_PPS, idr_nal]))
+                        } else {
+                            vid_gop_pos += 1;
+                            Some(annexb_au(&[p_nal]))
+                        }
+                    }
+                }
+                None => {
+                    if !warned_no_video {
+                        warned_no_video = true;
+                        eprintln!(
+                            "media: no camera frame — not sending video (ZALO_CALL_FAKE_VIDEO=1 sends the test pattern)"
+                        );
+                    }
+                    if last_no_video_note.elapsed() >= Duration::from_secs(5) {
+                        last_no_video_note = std::time::Instant::now();
+                        crate::voip_log::line(
+                            "CALL",
+                            "video: no camera frame; not sending video (ZALO_CALL_FAKE_VIDEO=1 re-enables the test pattern)",
+                        );
+                    }
+                    None
                 }
             };
 
-            let payloads = packetize_zalo_au(&au_bytes, RTP_MAX_PAYLOAD);
-            let last = payloads.len().saturating_sub(1);
-            for (i, (vpt, payload)) in payloads.iter().enumerate() {
-                let vpkt = build_rtp_packet(*vpt, i == last, vid_seq, vid_ts, vid_ssrc, payload);
-                vid_seq = vid_seq.wrapping_add(1);
-                vid_pkts_tx = vid_pkts_tx.wrapping_add(1);
-                vid_octets_tx = vid_octets_tx.wrapping_add(payload.len() as u32);
-                if let (Some(tsock), Some(target)) = (&udp_rtp_sock, rtp_sock_addr) {
-                    if relay_token != 0 {
-                        let type_byte: u8 = 0x0D; // `ZRTPPacket::initZRTPPacketVideo` (`isRtcp=false`)
-                        let mut wire = Vec::with_capacity(5 + vpkt.len());
-                        wire.push(type_byte);
-                        wire.extend_from_slice(&relay_token.to_le_bytes());
-                        wire.extend_from_slice(&vpkt);
-                        send_dgram(tsock, &wire, target, &mut txs);
-                        wl.rtp(">", type_byte, wire.len(), &rtp_addr, &vpkt);
-                    } else {
-                        send_dgram(tsock, &vpkt, target, &mut txs);
-                        wl.rtp(">", vpkt[0], vpkt.len(), &rtp_addr, &vpkt);
+            if let Some(au_bytes) = au_bytes {
+                let payloads = packetize_zalo_au(&au_bytes, RTP_MAX_PAYLOAD);
+                let last = payloads.len().saturating_sub(1);
+                for (i, (vpt, payload)) in payloads.iter().enumerate() {
+                    let vpkt = build_rtp_packet(*vpt, i == last, vid_seq, vid_ts, vid_ssrc, payload);
+                    vid_seq = vid_seq.wrapping_add(1);
+                    vid_pkts_tx = vid_pkts_tx.wrapping_add(1);
+                    vid_octets_tx = vid_octets_tx.wrapping_add(payload.len() as u32);
+                    if let (Some(tsock), Some(target)) = (&udp_rtp_sock, rtp_sock_addr) {
+                        if relay_token != 0 {
+                            let type_byte: u8 = 0x0D; // `ZRTPPacket::initZRTPPacketVideo` (`isRtcp=false`)
+                            let mut wire = Vec::with_capacity(5 + vpkt.len());
+                            wire.push(type_byte);
+                            wire.extend_from_slice(&relay_token.to_le_bytes());
+                            wire.extend_from_slice(&vpkt);
+                            send_dgram(tsock, &wire, target, &mut txs);
+                            wl.rtp(">", type_byte, wire.len(), &rtp_addr, &vpkt);
+                        } else {
+                            send_dgram(tsock, &vpkt, target, &mut txs);
+                            wl.rtp(">", vpkt[0], vpkt.len(), &rtp_addr, &vpkt);
+                        }
                     }
                 }
+                vid_frame_no = vid_frame_no.wrapping_add(1);
+                vid_ts = vid_ts.wrapping_add(6000); // 90000 Hz / 15 fps
             }
-            vid_frame_no = vid_frame_no.wrapping_add(1);
-            vid_ts = vid_ts.wrapping_add(6000); // 90000 Hz / 15 fps
         }
         if last_rtcp.elapsed() >= Duration::from_secs(2) {
             last_rtcp = std::time::Instant::now();
@@ -1801,7 +1859,15 @@ fn run_h264_ffmpeg_decoder(
     const VID_H: usize = 480;
     const FRAME_BYTES: usize = VID_W * VID_H * 4;
 
-    let mut cmd = Command::new("ffmpeg");
+    let Some(ffmpeg) = crate::video::find_ffmpeg() else {
+        eprintln!("media: ffmpeg not found — incoming video cannot be decoded");
+        crate::voip_log::line(
+            "VDEC",
+            "ffmpeg not found; remote video decoding disabled".to_string(),
+        );
+        return;
+    };
+    let mut cmd = Command::new(ffmpeg);
     cmd.args([
         "-hide_banner",
         "-loglevel",
