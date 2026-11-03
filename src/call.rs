@@ -1107,14 +1107,30 @@ fn str_at(node: &Value, keys: &[&str]) -> Option<String> {
 
 /// Boolean-ish JSON value: `true`/`false`, `0`/`1`, `"0"`/`"1"`, `"true"`/`"false"`.
 fn flag_at(node: &Value, key: &str) -> Option<bool> {
-    match node.get(key)? {
+    bool_of(node.get(key)?)
+}
+
+/// Boolean-ish JSON value (see [`flag_at`]).
+fn bool_of(v: &Value) -> Option<bool> {
+    match v {
         Value::Bool(b) => Some(*b),
-        Value::Number(n) => n.as_i64().map(|v| v != 0),
+        Value::Number(n) => n.as_i64().map(|x| x != 0),
         Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" => Some(true),
             "0" | "false" | "no" => Some(false),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// Integer-ish JSON value: a number (signed or unsigned that fits `i64`) or a decimal string.
+fn i64_of(v: &Value) -> Option<i64> {
+    match v {
+        Value::Number(n) => n
+            .as_i64()
+            .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok())),
+        Value::String(s) => s.trim().parse::<i64>().ok(),
         _ => None,
     }
 }
@@ -1157,6 +1173,194 @@ fn normalize_group_id(raw: &str) -> String {
     } else {
         stripped.to_string()
     }
+}
+
+/// Structural summary of a `syncmsg_info` backup description.
+///
+/// **Shape only, never values:** `url` may carry a one-shot token in its query string and
+/// `encrypted_key`/`checksum` are secret material, so this struct keeps lengths, presence flags
+/// and a bare URL host — no token, no query, no key bytes. [I] The field names come from
+/// `re-notes/11` §B3.2; they are only a reading aid for `--dev` logs until a real transfer event
+/// is observed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackupInfo {
+    /// UTF-8 byte length of `file_name`.
+    pub file_name_len: usize,
+    pub url_present: bool,
+    /// Host of `url` only (scheme/path/query/fragment/userinfo/port removed).
+    pub url_host: Option<String>,
+    /// `checksum_code` or `checksum` present and non-empty.
+    pub checksum_present: bool,
+    /// Byte length of `encrypted_key` (the value itself is never retained).
+    pub encrypted_key_len: usize,
+    pub db_format: Option<i64>,
+    pub is_full_transfer: Option<bool>,
+    pub from_seq_id: Option<i64>,
+    pub min_seq_id: Option<i64>,
+    /// `Some(true/false)` only when `pc_name` was present; compared raw and trimmed.
+    pub pc_name_matches_session: Option<bool>,
+    /// `Some(true/false)` only when `public_key` was present; compared raw and trimmed.
+    pub public_key_matches_session: Option<bool>,
+}
+
+/// One phone→PC data-transfer control event, decoded structurally (nothing is requested or
+/// decrypted here).
+///
+/// `act` is kept verbatim: `user_confirm`, `transfer_error`, `syncmsg_info`,
+/// `transfer_after_login`. The control's `act_type` remains **[U]**: it has not been observed on a
+/// real transfer event, so filtering goes by `act` only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferEvent {
+    pub act: String,
+    /// Conversation hint (`toid` for 1-1, `id` for a group, prefix-normalized) when present.
+    pub thread_hint: Option<String>,
+    /// `user_confirm`: `0` declined, `1`/`3` accepted, `2` restoring.
+    pub user_action: Option<i64>,
+    /// `transfer_error`: phone state (`1` active, `2` idle).
+    pub status: Option<i64>,
+    /// `transfer_error`: non-zero means the phone/PC reported a failure.
+    pub error_code: Option<i64>,
+    /// `transfer_after_login`: whether a `temp_key` was carried (its value is never kept).
+    pub temp_key_present: bool,
+    /// `syncmsg_info`: structural summary of the backup description.
+    pub backup: Option<BackupInfo>,
+}
+
+/// How a transfer control's `act` may be spelled; anything else is not a transfer event.
+const TRANSFER_ACTS: [&str; 4] = [
+    "user_confirm",
+    "transfer_error",
+    "syncmsg_info",
+    "transfer_after_login",
+];
+
+/// Extract phone→PC transfer controls from a decrypted `getControllFromPolling` payload.
+///
+/// Same input shape and helpers as [`extract_typing_events`]/[`extract_voip_controls`]:
+/// `data_node["controls"]`, each item's `content` may be an object or a JSON-encoded string.
+/// This is a read-only reader for `--dev` logging: it issues no request, decrypts nothing, and
+/// keeps only the structural summary in [`BackupInfo`].
+///
+/// `pc_name`/`public_key` are compared with the current session exactly and after trimming, the
+/// way `handleCtrlEvents` of Zalo PC drops events addressed to another PC.
+///
+/// [I] Field names are taken from `re-notes/11` §B3.2; `act_type` is [U] until a real event is
+/// captured, so classification uses `act` only.
+pub fn extract_transfer_events(
+    data_node: &Value,
+    session_pc_name: &str,
+    session_public_key: &str,
+) -> Vec<TransferEvent> {
+    let mut out = Vec::new();
+    let Some(controls) = data_node.get("controls").and_then(Value::as_array) else {
+        return out;
+    };
+    for item in controls {
+        let Some(content) = control_content(item) else {
+            continue;
+        };
+        let data = control_data(&content);
+        let Some(act) = str_at(&content, &["act"]).or_else(|| str_at(&data, &["act"])) else {
+            continue;
+        };
+        if !TRANSFER_ACTS.contains(&act.as_str()) {
+            continue;
+        }
+
+        let at = |key: &str| data.get(key).or_else(|| content.get(key));
+        let is_group = typing_is_group(&data, Some(act.as_str()), None);
+        let raw_thread = typing_thread_id(&data, is_group);
+        let thread_hint = (!raw_thread.is_empty()).then(|| normalize_group_id(&raw_thread));
+
+        let event = TransferEvent {
+            user_action: at("user_action").and_then(i64_of),
+            status: at("status").and_then(i64_of),
+            error_code: at("error_code").and_then(i64_of),
+            temp_key_present: at("temp_key").map(non_empty_value).unwrap_or(false),
+            thread_hint,
+            backup: (act == "syncmsg_info").then(|| {
+                backup_info(&data, &content, session_pc_name, session_public_key)
+            }),
+            act,
+        };
+        out.push(event);
+    }
+    out
+}
+
+/// Structural summary of one `syncmsg_info` payload (see [`BackupInfo`]).
+fn backup_info(
+    data: &Value,
+    content: &Value,
+    session_pc_name: &str,
+    session_public_key: &str,
+) -> BackupInfo {
+    let at = |key: &str| data.get(key).or_else(|| content.get(key));
+    let text = |key: &str| at(key).and_then(Value::as_str).unwrap_or("");
+    let url = text("url");
+    BackupInfo {
+        file_name_len: text("file_name").len(),
+        url_present: !url.trim().is_empty(),
+        url_host: url_host_only(url),
+        checksum_present: ["checksum_code", "checksum"]
+            .iter()
+            .any(|key| at(key).map(non_empty_value).unwrap_or(false)),
+        encrypted_key_len: text("encrypted_key").len(),
+        db_format: at("db_format").and_then(i64_of),
+        is_full_transfer: at("is_full_transfer").and_then(bool_of),
+        from_seq_id: at("from_seq_id").and_then(i64_of),
+        min_seq_id: at("min_seq_id").and_then(i64_of),
+        pc_name_matches_session: matches_session(at("pc_name"), session_pc_name),
+        public_key_matches_session: matches_session(at("public_key"), session_public_key),
+    }
+}
+
+/// Is a JSON value present and non-empty? (`null` and `""` are not.)
+fn non_empty_value(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::String(s) => !s.trim().is_empty(),
+        _ => true,
+    }
+}
+
+/// Compare a session-identifying field with the local session (exact, then trimmed).
+///
+/// `None` when the field is absent or not a string, so the caller can tell "not advertised" from
+/// "does not match".
+fn matches_session(field: Option<&Value>, session: &str) -> Option<bool> {
+    let raw = field?.as_str()?;
+    Some(raw == session || raw.trim() == session.trim())
+}
+
+/// Host part of a URL, with scheme, path, query, fragment, userinfo and port removed.
+///
+/// `syncmsg_info.url` may carry a one-shot token in its query string, so the event log must never
+/// retain the URL: only the host leaves this function. Hand-parsed on purpose (the crate has no
+/// URL parser); anything without a host yields `None`, which keeps the value out of the log.
+fn url_host_only(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let rest = match trimmed.split_once("://") {
+        Some((_, rest)) => rest,
+        None if trimmed.starts_with("//") => &trimmed[2..],
+        None => return None,
+    };
+    let authority = rest
+        .split(|c| matches!(c, '/' | '?' | '#'))
+        .next()
+        .unwrap_or("");
+    // Drop `user[:pass]@` if present.
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    if host_port.is_empty() {
+        return None;
+    }
+    let host = if let Some(v6) = host_port.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    let host = host.trim();
+    (!host.is_empty()).then(|| host.to_string())
 }
 
 /// One `lp_control` reply: its VoIP control events and the whole `data` node (which also
@@ -3372,6 +3576,117 @@ mod tests {
         // No `controls` node at all -> empty, exactly like `extract_voip_controls`.
         assert!(extract_typing_events(&json!({ "data": {} })).is_empty());
         assert!(extract_typing_events(&json!({ "controls": [] })).is_empty());
+    }
+
+    #[test]
+    fn syncmsg_info_keeps_only_backup_shape_and_never_the_url_token() {
+        let data_node = json!({
+            "controls": [
+                // Full backup description; the URL carries a one-shot token in its query.
+                { "content": { "act": "syncmsg_info", "data": {
+                    "file_name": "zalo_backup.db",
+                    "url": "https://cdn.zdn.vn/backup/abc?token=SECRET",
+                    "checksum_code": "abc123",
+                    "encrypted_key": "0123456789abcdef0123456789abcdef",
+                    "db_format": 1,
+                    "is_full_transfer": true,
+                    "from_seq_id": "10",
+                    "min_seq_id": 3,
+                    "pc_name": "PC-A",
+                    "public_key": "PUB-KEY"
+                }}},
+                // A URL without a query string still yields its host.
+                { "content": { "act": "syncmsg_info", "data": {
+                    "file_name": "b.db",
+                    "url": "https://cdn.example/backup.bin",
+                    "pc_name": "PC-A"
+                }}},
+            ]
+        });
+
+        let events = extract_transfer_events(&data_node, "PC-A", "PUB-KEY");
+        assert_eq!(events.len(), 2, "{events:?}");
+
+        let full = &events[0];
+        assert_eq!(full.act, "syncmsg_info");
+        assert!(full.user_action.is_none() && full.status.is_none() && full.error_code.is_none());
+        assert!(!full.temp_key_present);
+        let b = full.backup.as_ref().expect("backup summary");
+        assert_eq!(b.file_name_len, "zalo_backup.db".len());
+        assert!(b.url_present);
+        assert_eq!(b.url_host.as_deref(), Some("cdn.zdn.vn"));
+        assert!(b.checksum_present);
+        assert_eq!(b.encrypted_key_len, 32);
+        assert_eq!(b.db_format, Some(1));
+        assert_eq!(b.is_full_transfer, Some(true));
+        assert_eq!(b.from_seq_id, Some(10), "numeric strings are accepted");
+        assert_eq!(b.min_seq_id, Some(3));
+        assert_eq!(b.pc_name_matches_session, Some(true));
+        assert_eq!(b.public_key_matches_session, Some(true));
+
+        // Nothing secret may survive anywhere in the event: no token, no query, no path, no key.
+        let dump = format!("{events:?}");
+        for secret in ["SECRET", "token=", "0123456789abcdef", "backup/abc"] {
+            assert!(!dump.contains(secret), "leaked {secret:?} in {dump}");
+        }
+
+        let plain = &events[1];
+        let b2 = plain.backup.as_ref().expect("backup summary");
+        assert!(b2.url_present);
+        assert_eq!(b2.url_host.as_deref(), Some("cdn.example"));
+        assert!(!b2.checksum_present);
+        assert_eq!(b2.encrypted_key_len, 0);
+        assert_eq!(b2.public_key_matches_session, None, "absent field is not a mismatch");
+
+        // A different local session is reported as a mismatch, not silently accepted.
+        let other = extract_transfer_events(&data_node, "PC-B", "OTHER");
+        let b = other[0].backup.as_ref().expect("backup summary");
+        assert_eq!(b.pc_name_matches_session, Some(false));
+        assert_eq!(b.public_key_matches_session, Some(false));
+
+        // No `controls` node at all -> empty.
+        assert!(extract_transfer_events(&json!({}), "PC-A", "PUB-KEY").is_empty());
+    }
+
+    #[test]
+    fn user_confirm_transfer_error_and_temp_key_are_classified() {
+        let data_node = json!({
+            "controls": [
+                { "content": { "act": "user_confirm", "data": { "user_action": 0 } } },
+                // Content as a JSON string, with the action carried as a numeric string.
+                { "content": "{\"act\":\"user_confirm\",\"data\":{\"user_action\":\"2\"}}" },
+                { "content": { "act": "user_confirm", "data": { "user_action": 3, "toid": "123456789" } } },
+                { "content": { "act": "transfer_error", "data": { "status": 1, "error_code": 7 } } },
+                { "content": { "act": "transfer_after_login", "data": { "temp_key": "TEMP-SECRET", "imei": "imei-1" } } },
+                // Irrelevant / malformed controls are skipped without panicking.
+                { "content": { "act": "typing", "data": { "toid": "1" } } },
+                { "content": "not json" },
+                { "nope": 1 },
+            ]
+        });
+
+        let events = extract_transfer_events(&data_node, "PC-A", "PUB-KEY");
+        assert_eq!(events.len(), 5, "{events:?}");
+
+        assert_eq!(events[0].act, "user_confirm");
+        assert_eq!(events[0].user_action, Some(0), "0 = declined");
+        assert_eq!(events[1].user_action, Some(2), "string action, 2 = restoring");
+        assert_eq!(events[2].user_action, Some(3), "3 = accepted");
+        assert_eq!(events[2].thread_hint.as_deref(), Some("123456789"));
+        assert!(events[2].backup.is_none() && !events[2].temp_key_present);
+
+        assert_eq!(events[3].act, "transfer_error");
+        assert_eq!(events[3].status, Some(1));
+        assert_eq!(events[3].error_code, Some(7));
+
+        assert_eq!(events[4].act, "transfer_after_login");
+        assert!(events[4].temp_key_present);
+
+        // The temp key and any unrelated field must never be retained.
+        let dump = format!("{events:?}");
+        for secret in ["TEMP-SECRET", "imei-1"] {
+            assert!(!dump.contains(secret), "unexpected value kept: {dump}");
+        }
     }
 
     #[test]

@@ -607,6 +607,22 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                                 });
                                                 ctx_ws.request_repaint();
                                             }
+                                            // Part B (B3.2): transfer/backup events from the phone.
+                                            // Structure only — `TransferEvent` never carries the URL
+                                            // token, the encrypted key or the temp key itself.
+                                            {
+                                                let pc_name = s_snap.computer_name.clone();
+                                                for ev in crate::call::extract_transfer_events(
+                                                    data_node,
+                                                    &pc_name,
+                                                    "",
+                                                ) {
+                                                    crate::voip_log::line(
+                                                        "TRANSFER",
+                                                        format!("{ev:?}"),
+                                                    );
+                                                }
+                                            }
                                             if matches!(
                                                 ev.cmd,
                                                 crate::socket::CMD_PUSH_REACTION
@@ -706,6 +722,20 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                             is_typing: typing.is_typing,
                                         });
                                         ctx_ctrl.request_repaint();
+                                    }
+                                    // Part B (B3.2): structural log only, same rules as the WS path.
+                                    {
+                                        let pc_name = s_snap.computer_name.clone();
+                                        for ev in crate::call::extract_transfer_events(
+                                            &poll.data,
+                                            &pc_name,
+                                            "",
+                                        ) {
+                                            crate::voip_log::line(
+                                                "TRANSFER",
+                                                format!("{ev:?}"),
+                                            );
+                                        }
                                     }
                                     send_reactions(&poll.data, &s_snap, &gui_tx_ctrl, &ctx_ctrl);
                                 } else {
