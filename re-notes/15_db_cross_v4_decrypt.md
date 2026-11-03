@@ -13,7 +13,8 @@
 | Cipher + IV | AES-256-CBC; **IV = 16 byte 0 cho TỪNG chunk 64 KiB** (không nối tiếp giữa các chunk; CBC chỉ nối trong chunk) | `[O]` |
 | Padding | Chỉ **làm tròn độ dài lên bội số 16** để cấp buffer; **không có bước bỏ padding** ở đường giải mã; ghi ra đúng `inlen` byte | `[O]` |
 | Thứ tự | **Giải mã → parse header → giải nén**. V2: `0x1C0C0` rồi `0x1AE00`; V1 chỉ giải nén + MD5 (không AES) | `[O]` |
-| MD5 input | **Luồng nén** (buffer là INPUT của lzma), băm **sau** lời gọi decode trong mỗi vòng, **không** băm luồng đã giải nén | `[O]`/`[I]` |
+| MD5 input | **Luồng nén** (INPUT của lzma), băm **sau** decode mỗi vòng; digest lưu ở blob `+4` (vùng 64 B), **32 B đầu XOR với `hex(MD5(password))`** — chi tiết **note 16** | `[O]` |
+| Framing payload | Mỗi file là **1 blob**: `[u32][32 B hex XOR][32 B][16 B][16 B][blocks 16 B]`; payload bắt đầu ở offset `A`; header **không** có field đuôi — chi tiết **note 16** | `[O]`/`[I]` |
 | `0x29680` | **Dead code** (0 xref: code + `.data`/`.rdata`, cả VA lẫn RVA) | `[O]` |
 
 ## 1. Layout header `[O]` (hàm parse `0x1AE00`, hàm mở/giải mã `0x1C0C0`)
@@ -168,8 +169,8 @@ fn decrypt_in_place(file: &mut [u8], password: &[u8]) -> Result<()> { // [O] §3
     }
     if &file[..6] != MAGIC { return Err(Error::InvalidSignature); }
     Ok(())
-}// V2: decrypt_in_place -> parse_header -> (từng file) xz_decompress + verify_md5(luồng nén)
-// V1: (không AES) XOR 16B + xz_decompress; MD5 so với 32-hex đọc từ file
+}
+// V2: decrypt_in_place -> parse_header -> xz_decompress + md5;  V1: [u32][32B hex][16B][16B][16B-blocks]
 ```
 
 ## 8. Đủ để viết Rust chưa?
@@ -179,10 +180,10 @@ fn decrypt_in_place(file: &mut [u8], password: &[u8]) -> Result<()> { // [O] §3
 | 1. Cắt 64 KiB/chunk, AES-256-CBC, **IV = 0 mỗi chunk** | **ĐỦ** `[O]` | đã có asm `0x26B50` + `0x1C0C0`; không unpad |
 | 2. KDF `key = password[..32]` zero-pad | **ĐỦ** `[O]` | không băm, không lặp |
 | 3. Parse header (`ZDB4.0`, u32 BE, xxh32 verify, entries) | **ĐỦ** `[O]` | cần crate `xxhash-rust` (xxh32 seed 0) hoặc tự viết |
-| 4. Xác định **payload từng file** trong container (vị trí/độ dài) | **THIẾU** `[U]` | header chỉ có `name` + `size`; chưa đọc hết phần sau entries |
+| 4. Xác định **payload từng file** (vị trí/độ dài) + framing blob | **Một phần** `[O]`/`[I]` | payload ở offset `A`; mỗi file 1 blob `[u32][32B hex XOR][32B][16B][16B][blocks]` (**note 16**); còn `[U]` 32 B phụ |
 | 5. Giải nén XZ (liblzma) | **Một phần** `[I]` | container XZ `[I]`; memlimit/flags chưa đọc |
-| 6. MD5 verify (luồng nén) | **Một phần** `[O]`+`[U]` | biết phạm vi (input lzma) nhưng chưa rõ vị trí + de-obfuscate hex |
-| 7. (V1) lớp XOR 16 byte trước khi giải nén | **THIẾU** `[U]` | `0x2B010`/staging chưa đọc hết |
+| 6. MD5 verify (luồng nén) | **ĐỦ** `[O]` | digest ở blob `+4`; khoá XOR = `hex(MD5(password))` (32 ASCII, `0x2A050`); so sau decode |
+| 7. (V1) lớp XOR 16 byte trước khi giải nén | **THIẾU** `[U]` | `0x2B010` = XOR khối 16 B (BE) với keystream tại `state+0x100`; nguồn keystream chưa đọc |
 
 **Kết luận cho quyết định của Lead:** module **`sync_v1` (chỉ `parse_header` + KDF)** đã **đủ căn cứ để viết ngay**
 (bước 2 và 3 `[O]`), có thể tự sinh test vector (tự dựng header + tự tính XXH32, không cần file thật).
@@ -190,11 +191,10 @@ Phần `decrypt`/`decompress` **chưa nên viết** vì thiếu bước 4 và 7 
 
 ## 9. Còn thiếu + cách xác minh
 
-`[U]` còn lại: (a) đuôi header sau entries; (b) framing payload từng file; (c) vị trí + cách de-obfuscate 32 hex MD5; (d) tham số liblzma (`lzma_stream`, memlimit, `LZMA_CONCATENATED`); (e) lớp XOR 16 byte của V1.
-**Xác minh bằng file thật:** (1) lấy 1 file `format 1` + `privateKey`, giải mã `key = password[..32]`, IV = 0 theo chunk — 6 byte đầu phải ra `"ZDB4.0"`; (2) nếu sai, thử `hex::decode(privateKey)[..32]`, `md5(password)`, `to_uppercase()[..32]`; (3) so `nfile`/entries với `list_files.size()` trong log Zalo để chốt `A`; (4) so 32 hex đọc ở offset 0x18 với `md5(compressed)`/`md5(decompressed)`; (5) file > 64 KiB: thử chunk 2 với IV = 0 (kỳ vọng đúng) và với 16 byte cuối chunk 1 (kỳ vọng sai) để xác nhận §3.
+`[U]` còn lại (chi tiết + asm: **note 16**): (a) 32 byte phụ của vùng digest blob `+0x24`; (b) ý nghĩa `u32` blob `+0x00`; (c) keystream của `0x2B010` (V1); (d) tham số liblzma; (e) ai tách blob và `size` có phải kích thước blob. **Xác minh bằng file thật:** (1) giải mã AES `key = password[..32]`, IV = 0 theo chunk — 6 byte đầu phải ra `"ZDB4.0"`; (2) nếu sai thử `hex::decode(privateKey)[..32]`, `md5(password)`, `to_uppercase()[..32]`; (3) so `nfile`/entries với log `list_files.size()`; (4) XOR 32 B tại blob `+4` với `hex_lower(md5(password))` rồi so digest; (5) file > 64 KiB: thử chunk 2 với IV = 0 (kỳ vọng đúng) và với 16 byte cuối chunk 1 (kỳ vọng sai).
 
 ## 10. Phụ lục — tái lập
 
-`%TEMP%\qtzalo_re\`: `peutil.py` (PE + disasm theo **delta địa chỉ**), `s16_dump.py`, `s16_md5fam.py`, `s16_order2.py`, `s15_seq.py`, `s15_callers.py`; output `d16_open.txt`, `d16_cbc.txt`, `d16_md5.txt`, `d16_md5fam.txt`, `d16_md5order2.txt`. **Không** suy độ dài lệnh từ cột byte của dumpbin (bị cắt ở 6 byte).
+`%TEMP%\qtzalo_re\`: `peutil.py` (PE + disasm theo **delta địa chỉ**), `s16_*.py`, `s17_*.py`, `s15_seq.py`, `s15_callers.py`; output `d16_*.txt`, `d17_*.txt`. **Không** suy độ dài lệnh từ cột byte của dumpbin (bị cắt ở 6 byte).
 
 *Hết ghi chú 15.*
