@@ -75,11 +75,11 @@ pub struct ReactionEvent {
 /// What the reaction chip shows.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReactionSummary {
-    /// Emoji by number of people, most first; ties keep first-seen order.
+    /// Emoji by number of taps, most first; ties keep first-seen order.
     pub emojis: Vec<(String, usize)>,
-    /// People with a reaction.
+    /// Taps (Zalo counts every tap).
     pub total: usize,
-    /// This account's reaction.
+    /// This account's latest reaction.
     pub mine: Option<String>,
 }
 
@@ -193,26 +193,38 @@ pub fn extract_events(payload: &Value, self_uid: &str, cloud_id: Option<&str>) -
     out
 }
 
-/// Apply one server event: each person keeps their newest reaction. Returns `true` if the
-/// stored data changed. Entries without a uid (pre-v0.1.3) are never touched.
+/// Apply one server event. Like Zalo, every tap counts: each event is one entry, and the same
+/// event delivered twice (same person, emoji and `ts`) counts once. A removal clears that
+/// person's taps and stays as a marker (`emoji` empty), so older replays cannot bring them back.
+/// Returns `true` if the stored data changed. Entries without a uid (pre-v0.1.3) are never
+/// touched.
 pub fn apply(reactions: &mut Vec<MsgReaction>, ev: &ReactionEvent) -> bool {
     if ev.uid.is_empty() {
         return false;
     }
-    match reactions.iter_mut().find(|r| r.uid == ev.uid) {
-        Some(r) => {
-            if ev.ts < r.ts || (r.emoji == ev.emoji && r.ts == ev.ts) {
-                return false;
-            }
-            r.emoji = ev.emoji.clone();
-            r.ts = ev.ts;
-            true
-        }
-        None => {
-            reactions.push(MsgReaction { uid: ev.uid.clone(), emoji: ev.emoji.clone(), ts: ev.ts });
-            true
-        }
+    let removed_at = reactions
+        .iter()
+        .filter(|r| r.uid == ev.uid && r.emoji.is_empty())
+        .map(|r| r.ts)
+        .max();
+    if removed_at.is_some_and(|t| t >= ev.ts) {
+        return false;
     }
+    if ev.emoji.is_empty() {
+        reactions.retain(|r| r.uid != ev.uid || (!r.emoji.is_empty() && r.ts > ev.ts));
+        reactions.push(MsgReaction { uid: ev.uid.clone(), emoji: String::new(), ts: ev.ts });
+        return true;
+    }
+    if reactions.iter().any(|r| r.uid == ev.uid && r.emoji == ev.emoji && r.ts == ev.ts) {
+        return false;
+    }
+    // The server's echo of a tap made in QTzalo settles that pending entry.
+    if let Some(p) = reactions.iter_mut().find(|r| r.uid == ev.uid && r.emoji == ev.emoji && r.ts == 0) {
+        p.ts = ev.ts;
+        return true;
+    }
+    reactions.push(MsgReaction { uid: ev.uid.clone(), emoji: ev.emoji.clone(), ts: ev.ts });
+    true
 }
 
 /// Apply events to the messages held in memory (the newest messages of each conversation).
@@ -239,20 +251,20 @@ pub fn apply_to_threads(threads: &mut [crate::chat::Thread], events: &[ReactionE
     changed
 }
 
-/// This account's reaction set from QTzalo (`""` = removed). `ts = 0` so the server's own event
-/// for it, which carries the real time, always wins.
-pub fn set_mine(reactions: &mut Vec<MsgReaction>, emoji: &str) {
-    match reactions.iter_mut().find(|r| r.uid == "0") {
-        Some(r) => {
-            r.emoji = emoji.to_string();
-            r.ts = 0;
-        }
-        None => reactions.push(MsgReaction { uid: "0".into(), emoji: emoji.to_string(), ts: 0 }),
-    }
+/// A tap made in QTzalo, pending (`ts = 0`) until the server's echo gives it its real time.
+pub fn add_mine(reactions: &mut Vec<MsgReaction>, emoji: &str) {
+    reactions.push(MsgReaction { uid: "0".into(), emoji: emoji.to_string(), ts: 0 });
+}
+
+/// "Gỡ cảm xúc" in QTzalo: all my taps go, with a pending removal marker.
+pub fn remove_mine(reactions: &mut Vec<MsgReaction>) {
+    reactions.retain(|r| r.uid != "0");
+    reactions.push(MsgReaction { uid: "0".into(), emoji: String::new(), ts: 0 });
 }
 
 pub fn summary(reactions: &[MsgReaction]) -> ReactionSummary {
     let mut s = ReactionSummary::default();
+    let mut mine_rank: Option<i64> = None;
     // A pre-v0.1.3 entry (no reactor) is most likely the same reaction a live event has since
     // attributed to someone: do not count it twice. Stored data keeps it.
     let shadowed = |r: &MsgReaction| {
@@ -264,7 +276,10 @@ pub fn summary(reactions: &[MsgReaction]) -> ReactionSummary {
             Some(entry) => entry.1 += 1,
             None => s.emojis.push((r.emoji.clone(), 1)),
         }
-        if r.uid == "0" {
+        // My latest tap; a pending one (ts 0) is the newest.
+        let rank = if r.ts == 0 { i64::MAX } else { r.ts };
+        if r.uid == "0" && mine_rank.is_none_or(|m| rank >= m) {
+            mine_rank = Some(rank);
             s.mine = Some(r.emoji.clone());
         }
     }
@@ -429,12 +444,52 @@ mod tests {
     }
 
     #[test]
-    fn apply_latest_ts_wins_and_older_replay_is_ignored() {
+    fn taps_accumulate_like_zalo() {
+        // [O] 03/11: three taps on ❤ on the phone are three events; another emoji is added,
+        // not swapped (`re-notes/10` §19).
         let mut r = Vec::new();
         assert!(apply(&mut r, &ev("222", false, "1", "222", "❤️", 10)));
+        assert!(apply(&mut r, &ev("222", false, "1", "222", "❤️", 11)));
         assert!(apply(&mut r, &ev("222", false, "1", "222", "😆", 20)));
-        assert!(!apply(&mut r, &ev("222", false, "1", "222", "❤️", 15)));
-        assert_eq!(r, vec![MsgReaction { uid: "222".into(), emoji: "😆".into(), ts: 20 }]);
+        assert!(apply(&mut r, &ev("222", false, "1", "222", "❤️", 15)));
+        let s = summary(&r);
+        assert_eq!(s.total, 4);
+        assert_eq!(s.emojis, vec![("❤️".to_string(), 3), ("😆".to_string(), 1)]);
+    }
+
+    #[test]
+    fn same_event_delivered_twice_counts_once() {
+        let mut r = Vec::new();
+        assert!(apply(&mut r, &ev("222", false, "1", "222", "❤️", 10)));
+        assert!(!apply(&mut r, &ev("222", false, "1", "222", "❤️", 10)));
+        assert_eq!(summary(&r).total, 1);
+    }
+
+    #[test]
+    fn removal_clears_every_tap_of_that_person_only() {
+        let mut r = Vec::new();
+        apply(&mut r, &ev("222", false, "1", "222", "❤️", 10));
+        apply(&mut r, &ev("222", false, "1", "222", "😆", 11));
+        apply(&mut r, &ev("222", false, "1", "333", "😮", 12));
+        assert!(apply(&mut r, &ev("222", false, "1", "222", "", 20)));
+        assert_eq!(summary(&r).emojis, vec![("😮".to_string(), 1)]);
+        // Tapping again after the removal counts again.
+        assert!(apply(&mut r, &ev("222", false, "1", "222", "❤️", 30)));
+        assert_eq!(summary(&r).total, 2);
+    }
+
+    #[test]
+    fn mine_is_my_latest_emoji_and_remove_mine_clears_it() {
+        let mut r = Vec::new();
+        apply(&mut r, &ev("222", false, "1", "0", "❤️", 10));
+        apply(&mut r, &ev("222", false, "1", "0", "😆", 20));
+        assert_eq!(summary(&r).mine.as_deref(), Some("😆"));
+        add_mine(&mut r, "👍");
+        assert_eq!(summary(&r).mine.as_deref(), Some("👍"));
+        assert_eq!(summary(&r).total, 3);
+        remove_mine(&mut r);
+        let s = summary(&r);
+        assert_eq!((s.total, s.mine), (0, None));
     }
 
     #[test]
@@ -448,13 +503,16 @@ mod tests {
     }
 
     #[test]
-    fn set_mine_then_server_echo_counts_once() {
+    fn add_mine_then_server_echo_counts_once() {
         let mut r = Vec::new();
-        set_mine(&mut r, "👍");
+        add_mine(&mut r, "👍");
+        add_mine(&mut r, "👍");
         apply(&mut r, &ev("222", false, "1", "0", "👍", 50));
+        apply(&mut r, &ev("222", false, "1", "0", "👍", 51));
         let s = summary(&r);
-        assert_eq!(s.total, 1);
+        assert_eq!(s.total, 2);
         assert_eq!(s.mine.as_deref(), Some("👍"));
+        assert!(r.iter().all(|m| m.ts > 0));
     }
 
     #[test]
@@ -472,7 +530,7 @@ mod tests {
         apply(&mut r, &ev("222", false, "1", "222", "❤️", 5));
         assert_eq!(summary(&r).total, 1);
         let mut mine = legacy();
-        set_mine(&mut mine, "❤️");
+        add_mine(&mut mine, "❤️");
         let s = summary(&mine);
         assert_eq!(s.total, 1);
         assert_eq!(s.emojis, vec![("❤️".to_string(), 1)]);

@@ -2248,9 +2248,8 @@ fn hover_reaction_controls(
         .interact(button, key.with("btn"), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     if btn.clicked() {
-        if mine.as_deref() != Some("👍") {
-            action = Some(BubbleAction::React("👍"));
-        }
+        // Like Zalo, every click adds one 👍.
+        action = Some(BubbleAction::React("👍"));
         st = close_react_bar(st);
     }
 

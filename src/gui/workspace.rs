@@ -1444,17 +1444,14 @@ impl ZaloGuiApp {
                                     self.forward_msg = Some(m);
                                     self.forward_filter.clear();
                                 }
-                                // Same as my current reaction: nothing to send.
-                                BubbleAction::React(r)
-                                    if crate::reaction::summary(&m.reactions).mine.as_deref()
-                                        == Some(r) => {}
+                                // Like Zalo, every tap adds one (also the emoji I already chose).
                                 BubbleAction::React(r) => {
                                     if let Some(real) = self
                                         .threads
                                         .get_mut(self.selected_thread_index)
                                         .and_then(|t| t.messages.get_mut(idx))
                                     {
-                                        crate::reaction::set_mine(&mut real.reactions, r);
+                                        crate::reaction::add_mine(&mut real.reactions, r);
                                         self.status_msg = format!("Đã thả cảm xúc {r}");
                                     }
                                     self.persist_threads_async();
@@ -1475,7 +1472,7 @@ impl ZaloGuiApp {
                                         .get_mut(self.selected_thread_index)
                                         .and_then(|t| t.messages.get_mut(idx))
                                     {
-                                        crate::reaction::set_mine(&mut real.reactions, "");
+                                        crate::reaction::remove_mine(&mut real.reactions);
                                         self.status_msg = "Đã gỡ cảm xúc".into();
                                     }
                                     self.persist_threads_async();

@@ -139,11 +139,7 @@ enum BgEvent {
     StickerSent {
         thread_id: String,
     },
-    ReactionDone {
-        thread_id: String,
-        msg_id: String,
-        icon: String,
-    },
+    ReactionDone,
     DeleteDone {
         thread_id: String,
         msg_id: String,
@@ -857,19 +853,14 @@ impl<'a> TuiApp<'a> {
             .and_then(|t| t.messages.get_mut(mi))
         {
             let code = chat::reaction_code_and_type(emoji).0;
-            crate::reaction::set_mine(&mut m.reactions, chat::icon_to_emoji(code));
+            crate::reaction::add_mine(&mut m.reactions, chat::icon_to_emoji(code));
         }
         let session = self.session_clone();
         let tx = self.bg_tx.clone();
-        let msg_id = msg.id.clone();
         tokio::spawn(async move {
             match chat::send_reaction(&session, &to_id, is_group, &msg, emoji).await {
                 Ok(_) => {
-                    let _ = tx.send(BgEvent::ReactionDone {
-                        thread_id: to_id,
-                        msg_id,
-                        icon: emoji.to_string(),
-                    });
+                    let _ = tx.send(BgEvent::ReactionDone);
                 }
                 Err(e) => {
                     logger::log_error("tui::send_reaction", &e.to_string());
@@ -1397,20 +1388,8 @@ impl<'a> TuiApp<'a> {
                     self.bump_thread(&thread_id);
                     self.status = "Da gui nhan dan".into();
                 }
-                BgEvent::ReactionDone {
-                    thread_id,
-                    msg_id,
-                    icon,
-                } => {
-                    if let Some(m) = self
-                        .threads
-                        .iter_mut()
-                        .find(|t| t.id == thread_id)
-                        .and_then(|t| t.messages.iter_mut().find(|m| m.id == msg_id))
-                    {
-                        let code = chat::reaction_code_and_type(&icon).0;
-                        crate::reaction::set_mine(&mut m.reactions, chat::icon_to_emoji(code));
-                    }
+                // Already counted when sent (`reaction::add_mine`).
+                BgEvent::ReactionDone => {
                     self.status = "Da tha cam xuc".into();
                 }
                 BgEvent::DeleteDone { thread_id, msg_id } => {

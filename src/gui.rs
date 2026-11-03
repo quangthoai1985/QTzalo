@@ -1204,8 +1204,8 @@ impl ZaloGuiApp {
                     }
                 }
                 GuiEvent::Reacted { reaction, .. } => {
-                    // The bubble was already updated locally (`reaction::set_mine`); the server's
-                    // own event settles it with the real time.
+                    // The bubble was already updated locally (`reaction::add_mine` /
+                    // `remove_mine`); the server's own event settles it with the real time.
                     self.status_msg = if reaction.is_empty() {
                         "Đã gỡ cảm xúc".into()
                     } else {
