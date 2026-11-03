@@ -355,11 +355,48 @@ pub fn load_threads_cache() -> Vec<Thread> {
     Vec::new()
 }
 
+/// Hash of the `threads_cache.json` content this process wrote last.
+///
+/// The GUI worker sends a `PersistThreads` snapshot on most commands; without this, the whole
+/// pretty-printed cache (messages included) was rewritten every time even when nothing changed.
+static LAST_CACHE_HASH: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+/// Content hash used only to compare one serialization with the previous one.
+fn cache_content_hash(text: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// `true` when the serialized cache must be written: first write, changed content, or the file
+/// is gone (deleted by the user or another build, so the remembered hash no longer describes it).
+fn cache_write_needed(new_hash: u64, last_hash: Option<u64>, file_exists: bool) -> bool {
+    !file_exists || last_hash != Some(new_hash)
+}
+
 /// Persist conversations and message history locally so they survive app restarts.
+///
+/// Serialized **once** and skipped when the bytes would be identical to the last write, so an
+/// unchanged snapshot costs a hash instead of a full rewrite. The file path, format and
+/// owner-only atomic write are unchanged.
 pub fn save_threads_cache(threads: &[Thread]) {
     // Message previews are private: owner-only, atomic write in the per-user data dir.
-    if let Ok(text) = serde_json::to_string_pretty(threads) {
-        let _ = crate::paths::write_private(&crate::paths::threads_cache_file(), text);
+    let Ok(text) = serde_json::to_string_pretty(threads) else {
+        return;
+    };
+    let path = crate::paths::threads_cache_file();
+    let hash = cache_content_hash(&text);
+    let last_hash = LAST_CACHE_HASH.lock().ok().and_then(|guard| *guard);
+    if !cache_write_needed(hash, last_hash, path.exists()) {
+        return;
+    }
+    // A failed write must not record the hash, otherwise the next call would skip the retry.
+    if crate::paths::write_private(&path, text).is_ok() {
+        if let Ok(mut guard) = LAST_CACHE_HASH.lock() {
+            *guard = Some(hash);
+        }
     }
 }
 
@@ -2564,6 +2601,20 @@ pub async fn send_reaction(
     Ok(resp)
 }
 
+/// Server-side id of a message that may be referenced by a write request (delete / recall).
+///
+/// A row with no server id yet (`out_*`, `local_*`, empty) exists only on this client: sending
+/// that id makes the server answer a generic error while the UI has already removed the bubble,
+/// i.e. a no-op that looks successful. `action` is the leading Vietnamese phrase so the caller's
+/// message stays specific ("Không xoá được tin này …" / "Không thu hồi được tin này …").
+fn server_message_id<'a>(msg: &'a ChatMessage, action: &str) -> Result<&'a str> {
+    let id = msg.id.trim();
+    if id.is_empty() || id.starts_with("out_") || id.starts_with("local_") {
+        anyhow::bail!("{action} (tin chưa có mã từ máy chủ)");
+    }
+    Ok(id)
+}
+
 /// Delete a message for me (`deleteOneOneMessageV2` / `deleteGroupMessageV2` @ `compact-app-pc.js:14373319`, cmd `11779` / `11834`).
 pub async fn delete_message_for_me(
     s: &Session,
@@ -2574,6 +2625,8 @@ pub async fn delete_message_for_me(
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
+    // Refuse before any request: a client-only id cannot be deleted on the server.
+    let msg_id = server_message_id(msg, "Không xoá được tin này")?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -2598,7 +2651,7 @@ pub async fn delete_message_for_me(
 
     let msgs_arr = json!([{
         "cliMsgId": cli_id,
-        "globalMsgId": msg.id,
+        "globalMsgId": msg_id,
         "ownerId": owner_id,
         "destId": to_id
     }]);
@@ -2655,6 +2708,8 @@ pub async fn recall_message(
     if s.login.is_none() {
         anyhow::bail!("chưa đăng nhập");
     }
+    // Refuse before any request: a client-only id cannot be recalled on the server.
+    let msg_id = server_message_id(msg, "Không thu hồi được tin này")?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -2671,7 +2726,7 @@ pub async fn recall_message(
             .trim_start_matches('g')
             .trim_start_matches('G');
         let body = obj(&[
-            ("msgId", json!(msg.id)),
+            ("msgId", json!(msg_id)),
             ("grid", json!(clean_grid)),
             ("clientId", json!(now)),
             ("visibility", json!(0)),
@@ -2692,7 +2747,7 @@ pub async fn recall_message(
             &s.domains.chat
         };
         let body = obj(&[
-            ("msgId", json!(msg.id)),
+            ("msgId", json!(msg_id)),
             ("toid", json!(to_id)),
             ("clientId", json!(now)),
             ("cliMsgIdUndo", json!(cli_id)),
@@ -6227,5 +6282,49 @@ mod tests {
             assert_eq!(m.text, "xin chào", "{v}");
             assert!(m.is_outgoing, "{v}");
         }
+    }
+
+    // -- Đợt 2 (dọn nốt): id phía máy chủ + bỏ ghi cache khi không đổi --------------
+
+    #[test]
+    fn delete_and_recall_refuse_client_only_ids() {
+        let msg = |id: &str| ChatMessage {
+            id: id.into(),
+            ..Default::default()
+        };
+        // A server id passes through, trimmed.
+        assert_eq!(
+            server_message_id(&msg("8447783931887"), "Không xoá được tin này").unwrap(),
+            "8447783931887"
+        );
+        assert_eq!(
+            server_message_id(&msg(" 8447783931887 "), "Không thu hồi được tin này").unwrap(),
+            "8447783931887"
+        );
+        // A row that exists only on this client is refused, with the caller's own wording.
+        for id in ["", "   ", "out_1793705979842", "local_3"] {
+            let err = server_message_id(&msg(id), "Không xoá được tin này")
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, "Không xoá được tin này (tin chưa có mã từ máy chủ)");
+            let err = server_message_id(&msg(id), "Không thu hồi được tin này")
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, "Không thu hồi được tin này (tin chưa có mã từ máy chủ)");
+        }
+    }
+
+    #[test]
+    fn cache_write_is_skipped_only_for_an_unchanged_snapshot() {
+        // First write in this process, and changed content, both write.
+        assert!(cache_write_needed(7, None, true), "first write");
+        assert!(cache_write_needed(7, Some(9), true), "content changed");
+        // Same content with the file still there is the case the skip exists for.
+        assert!(!cache_write_needed(7, Some(7), true), "unchanged snapshot");
+        // The file vanished: the remembered hash no longer describes what is on disk.
+        assert!(cache_write_needed(7, Some(7), false), "file gone");
+        // Hash contract: equal text → equal hash, different text → different hash.
+        assert_eq!(cache_content_hash("[]"), cache_content_hash("[]"));
+        assert_ne!(cache_content_hash("[]"), cache_content_hash("[{}]"));
     }
 }
