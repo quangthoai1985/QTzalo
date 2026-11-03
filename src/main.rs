@@ -76,6 +76,18 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Keep SQLite compact once it grows past the threshold (WAL checkpoint + VACUUM). This never
+    // deletes a message; it only returns free pages to the file system (see `re-notes/12`).
+    if !demo_mode {
+        if let Ok(store) = store::MessageStore::open(paths::history_db()) {
+            match store.compact_if_needed(store::AUTO_COMPACT_MIN_BYTES) {
+                Ok(true) => println!("✓ Đã nén cơ sở dữ liệu lịch sử."),
+                Ok(false) => {}
+                Err(e) => eprintln!("! Không nén được cơ sở dữ liệu: {e}"),
+            }
+        }
+    }
+
     if force_logout && !demo_mode {
         let _ = std::fs::remove_file(paths::session_file());
         let _ = std::fs::remove_file(paths::threads_cache_file());

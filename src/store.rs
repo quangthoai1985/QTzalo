@@ -1,6 +1,10 @@
 //! Local message and thread store backed by SQLite (rusqlite bundled).
 //!
 //! Persists every message seen via polling or group history so chat history accumulates locally.
+//!
+//! [`MessageStore::compact_if_needed`] / [`MessageStore::compact`] are disk hygiene only (WAL
+//! checkpoint + `VACUUM`): they return free pages to the filesystem and **never delete a message**.
+//! Retention is a separate decision, so `raw_json` still keeps the full server payload forever.
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
@@ -38,8 +42,20 @@ pub struct MissingRange {
     pub reason: String,
 }
 
+/// Size above which the database is worth compacting, for callers that do not have their own
+/// policy: 32 MiB. A healthy history stays far below it; once a history crosses it, the price of
+/// `VACUUM` (see [`MessageStore::compact`]) is acceptable.
+///
+/// Suggested call site (not wired yet; GUI/worker should own the timing): after history finishes
+/// loading, or from a maintenance/settings action —
+/// `store.compact_if_needed(store::AUTO_COMPACT_MIN_BYTES)`.
+pub const AUTO_COMPACT_MIN_BYTES: u64 = 32 * 1024 * 1024;
+
 pub struct MessageStore {
     pub conn: Connection,
+    /// File behind the connection, `None` for `":memory:"`. Only the compaction helpers need it;
+    /// everything else works through [`MessageStore::conn`].
+    path: Option<std::path::PathBuf>,
 }
 
 impl MessageStore {
@@ -58,7 +74,8 @@ impl MessageStore {
     /// best-effort: an old/read-only/network volume must never stop the app from opening history.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = resolve_db_path(path.as_ref());
-        let conn = if path.as_os_str() == ":memory:" {
+        let in_memory = path.as_os_str() == ":memory:";
+        let conn = if in_memory {
             Connection::open_in_memory()?
         } else {
             let c = Connection::open(&path)?;
@@ -108,7 +125,72 @@ impl MessageStore {
             );",
         )?;
 
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            path: if in_memory { None } else { Some(path) },
+        })
+    }
+
+    /// On-disk footprint of the database in bytes: the main file plus its `-wal` sidecar, which is
+    /// where SQLite keeps new pages until a checkpoint (`0` for `":memory:"`).
+    ///
+    /// Both files must be counted: right after a fresh start the `.db` file can still be empty
+    /// while everything lives in the `-wal`, and a WAL that never checkpoints is exactly the kind
+    /// of growth this compaction exists to stop.
+    fn db_size_bytes(&self) -> u64 {
+        let Some(path) = self.path.as_deref() else {
+            return 0;
+        };
+        let mut wal_name = path.as_os_str().to_os_string();
+        wal_name.push("-wal");
+        let main = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let wal = std::fs::metadata(std::path::PathBuf::from(wal_name))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        main + wal
+    }
+
+    /// Reclaim disk space: `PRAGMA wal_checkpoint(TRUNCATE)` (fold the write-ahead log back into
+    /// the main file and empty the `-wal`) followed by `VACUUM` (rewrite the file without free
+    /// pages).
+    ///
+    /// **This only compacts; it is not a retention policy.** No row is deleted, `raw_json` keeps
+    /// its full payload, and a histogram of message ages is unchanged — only free pages and the
+    /// WAL are returned to the filesystem.
+    ///
+    /// Cost: `VACUUM` rewrites the whole database into a temporary file and then back, so it needs
+    /// free space about the size of the database and holds the write lock for the entire rewrite.
+    /// For a history of a few hundred MB expect seconds to minutes, and during that window other
+    /// connections (the worker opens its own) wait on `busy_timeout` (5 s from
+    /// [`open`](Self::open)) before failing with `database is locked`. Run it at a quiet moment,
+    /// never per message.
+    pub fn compact(&self) -> Result<()> {
+        // `execute_batch` discards the rows `wal_checkpoint` reports, so this is one round trip.
+        // A `busy` checkpoint is not an error; `VACUUM` still needs the lock and would fail
+        // through as an `Err` if another connection keeps it busy.
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
+        // VACUUM rewrites the file; re-assert owner-only permissions on Unix. Cheap and keeps the
+        // `0600` guarantee from `open` even on the platforms where the rewrite loses it.
+        if let Some(path) = self.path.as_deref() {
+            crate::paths::restrict_file(path);
+        }
+        Ok(())
+    }
+
+    /// Compact only when the database footprint is larger than `max_bytes` (see [`compact`]).
+    ///
+    /// Returns `Ok(true)` when compaction ran (even if the file did not get smaller — `VACUUM`
+    /// cannot shrink a database with no free pages), `Ok(false)` when it is at or below the
+    /// threshold. `":memory:"` counts as `0` bytes, so it never triggers. No message is deleted.
+    ///
+    /// [`compact`]: Self::compact
+    pub fn compact_if_needed(&self, max_bytes: u64) -> Result<bool> {
+        if self.db_size_bytes() <= max_bytes {
+            return Ok(false);
+        }
+        self.compact()?;
+        Ok(true)
     }
 
     /// Record a span in which messages may be missing (`conv_id = "*"`: any conversation),
@@ -1071,5 +1153,69 @@ mod tests {
         drop(second);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `compact_if_needed` compacts a file database above the threshold and keeps every message.
+    #[test]
+    fn compact_if_needed_vacuums_file_database_without_losing_messages() {
+        let dir = temp_db_dir("compact");
+        let db_path = dir.join("history.db");
+        let mut store = MessageStore::open(&db_path).unwrap();
+        let thread_id = "thread_compact";
+        for ts in 1..=200i64 {
+            store
+                .upsert_message(&text_message(&format!("c_{ts}"), thread_id, ts))
+                .unwrap();
+        }
+        assert!(store.db_size_bytes() > 0, "the database occupies bytes by now");
+
+        // A zero-byte threshold always runs; `true` is reported even when VACUUM cannot shrink
+        // much (a compact database has few free pages).
+        assert!(store.compact_if_needed(0).unwrap());
+        let integrity: String = store
+            .conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            200,
+            "compaction must not delete rows"
+        );
+        assert_eq!(store.messages_for(thread_id, 500).unwrap().len(), 200);
+
+        // Far below the threshold now; the documented constant is 32 MiB.
+        assert!(!store.compact_if_needed(u64::MAX).unwrap());
+        assert_eq!(AUTO_COMPACT_MIN_BYTES, 32 * 1024 * 1024);
+        assert!(!store.compact_if_needed(AUTO_COMPACT_MIN_BYTES).unwrap());
+
+        // Data survives the checkpoint + VACUUM across a reopen.
+        drop(store);
+        let reopened = MessageStore::open(&db_path).unwrap();
+        assert_eq!(reopened.messages_for(thread_id, 500).unwrap().len(), 200);
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// VACUUM on `:memory:` is a no-op that must not error, and an in-memory database has no file,
+    /// so the size threshold never triggers.
+    #[test]
+    fn compact_on_memory_database_is_a_harmless_noop() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        store
+            .upsert_message(&text_message("m_1", "t_mem", 1))
+            .unwrap();
+        assert_eq!(store.db_size_bytes(), 0, "no file exists for :memory:");
+        assert!(!store.compact_if_needed(0).unwrap(), "0 bytes is not above 0");
+        store.compact().unwrap();
+        assert_eq!(store.messages_for("t_mem", 10).unwrap().len(), 1);
+        let integrity: String = store
+            .conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
     }
 }
