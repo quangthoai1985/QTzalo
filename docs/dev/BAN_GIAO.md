@@ -158,20 +158,34 @@ thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.m
     **đối chiếu bằng `openssl enc`** trên máy. **Chưa nối vào client**, chưa có XZ.
   - Test: **276 pass / 1 ignored**; `cargo check --all-targets` 0 warning; MSRV 1.88 sạch;
     `cargo audit` 0 lỗ hổng (2 unmaintained).
+- **Đã sửa vòng 7 (Đợt 3 — framing payload + hoàn thiện module):**
+  - **`re-notes/16` (mới, 154 dòng):** đuôi header **không có field nào** `[O]` (header hết ngay sau
+    entry cuối; 7 chỗ `fread` đã liệt kê); **mỗi hội thoại một blob riêng** với bố cục
+    `+0x00 u32`, `+0x04 32 B hex MD5` (bị XOR), `+0x24 32 B`, `+0x44 16 B`, `+0x54 16 B`, rồi các
+    **khối 16 B**; **khoá XOR 32 B = 32 ký tự hex của `MD5(password)`** `[O]` (đối xứng với phía nén
+    XOR 0x21 byte và ghi 0x40 byte); lớp **XOR 16 B của V1** chỉ chốt được cơ chế (keystream
+    `state+0x100`), nguồn keystream còn `[U]`.
+  - **Module `sync_v1` mở rộng** (13 test): thêm `password_md5_hex` (vector MD5 chuẩn), `xor_digest`
+    (đối xứng, phụ thuộc mật khẩu), `decrypt_container` (chunk 64 KiB, IV 0 lại mỗi chunk),
+    `decompress_xz` (dep `lzma-rs` 0.3, fixture sinh bằng `python lzma`), `decrypt_and_parse`.
+    Test mới: pipeline giải mã + parse, container nhiều chunk (65 568 B), XZ fixture/hỏng/cắt.
+  - Test: **282 pass / 1 ignored**; `cargo check --all-targets` 0 warning; MSRV 1.88 sạch;
+    `cargo audit` 0 lỗ hổng (2 unmaintained).
 - **Tồn đọng còn lại (ưu tiên giảm dần):**
   1. Chưa ACK hàng đợi (`DELETE_QUEUE_ACK_*`) — cần bằng chứng thật, ACK sai mất tin.
   2. Chưa có retention cho `messages`/`raw_json` (chỉ nén, không xoá — đúng ý người dùng).
-  3. **Phần B:** format đã chốt, nhưng còn [U] framing payload từng file, đuôi header, vị trí + cách
-     de-obfuscate 32 hex MD5 khi đọc lại, tham số liblzma, và lớp **XOR 16 byte của V1**; chưa có
-     `pull_mobile_msg`/RSA/tải/giải mã. Cần **một file backup thật** để xác nhận KDF trước khi hoàn
-     thiện `decrypt()`.
+  3. **Phần B:** format + framing + primitives đã có; còn `[U]` 32 B phụ của vùng digest, ý nghĩa
+     `u32` đầu blob, keystream `0x2B010`, tham số liblzma, ai tách blob/`size`; và **chưa có**
+     `pull_mobile_msg`/RSA/tải/giải mã. Cần **một file backup thật** để xác nhận KDF + framing.
   4. TUI: chưa có cuộc gọi, chưa hiện "đang nhập"; nav "Khác"/"Trò chuyện ẩn"/zCloud vẫn "sắp có".
   5. Cần smoke-test tài khoản thật cho: xoá/thu hồi bằng `cliMsgId`, `typing`, reaction trong nhóm.
-- **Việc tiếp theo (Phần B):** (1) đọc framing payload từng file + đuôi header (`0x1AE00` sau entries)
-  và lớp XOR 16 byte của V1; (2) có **một file backup thật** (cần người dùng đồng ý chạy "Đồng bộ từ
-  điện thoại" trên Zalo PC chính thức) rồi thử `password[..32]` + AES-256-CBC IV 0 → nếu 6 byte đầu ra
-  `"ZDB4.0"` là xác nhận KDF; (3) sau đó mới thêm XZ (`xz2`/`lzma-rs`) và nối `sync_v1` vào luồng
-  phục hồi. Trước khi có (2), **không** gọi `pull_mobile_msg` (hành động thật trên tài khoản).
+- **Việc tiếp theo (Phần B):** (1) có **một file backup thật** (cần người dùng đồng ý chạy "Đồng bộ
+  từ điện thoại" trên Zalo PC chính thức) rồi thử `password[..32]` + AES-256-CBC IV 0 → nếu 6 byte
+  đầu ra `"ZDB4.0"` là xác nhận KDF; (2) so khớp framing thực tế với `re-notes/16` rồi bóc từng blob
+  (32 hex MD5 → `xor_digest`, 16 B ở `+0x44`/`+0x54` cần xác định), giải nén XZ và đối chiếu MD5;
+  (3) sau đó mới viết bước `pull_mobile_msg` (cần quyết định về `rsa` — crate này có advisory, sẽ phải
+  chọn `aws-lc-rs`/crate khác hoặc chấp nhận ngoại lệ có ghi chú). Trước khi có (1), **không** gọi
+  `pull_mobile_msg` (hành động thật trên tài khoản).
 - **Bài học phiên này (bổ sung 2):** công cụ có sẵn trong toolchain đôi khi đủ mạnh — `dumpbin` của
   VS Build Tools thay được Ghidra cho việc đọc hàm theo địa chỉ. Khi dumpbin cắt cột byte ở 6 byte,
   phải suy độ dài lệnh từ **địa chỉ dòng kế tiếp**, nếu không sẽ lệch và bỏ sót lệnh (đã làm hỏng

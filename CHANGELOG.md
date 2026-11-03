@@ -75,12 +75,14 @@ và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, ch
 - **Xoá/thu hồi dùng `cliMsgId` thật của tin** (trước luôn gửi `ts` ms, và gửi `now` khi thiếu `ts`);
   nếu tin không có cả `cliMsgId` lẫn thời điểm gửi thì từ chối với lỗi tiếng Việt thay vì gửi id bịa.
 - **Phần B — module `sync_v1`:** `src/sync_v1/format.rs` cài đặt định dạng `db-cross-v4` đã chốt bằng
-  disassembly: `XXH32` (có vector kiểm chuẩn), `parse_header` (magic `ZDB4.0`, độ dài header, bảng
-  `nfile` tệp, giới hạn tên 0x80 byte/kích thước 2e9), `derive_key` (password zero-pad 32 byte),
-  `decrypt_cbc_blocks`/`decrypt_cbc_pkcs7` (AES-256-CBC, IV 0, có vector NIST SP 800-38A).
-  **Chưa nối vào client** và **chưa có phần giải nén XZ**: cần một file backup thật để xác nhận KDF
-  và cách đóng gói payload (`re-notes/15` §8).
-- **Test:** 225 → **276** test qua (1 bỏ qua).
+  disassembly: `XXH32` (vector kiểm chuẩn từ `python-xxhash`), `parse_header` (magic `ZDB4.0`, độ dài
+  header, bảng `nfile` tệp, giới hạn tên 0x80 byte/kích thước 2e9), `derive_key` (password zero-pad
+  32 byte), `decrypt_cbc_blocks`/`decrypt_cbc_pkcs7` (AES-256-CBC, IV 0, vector NIST SP 800-38A đã
+  đối chiếu `openssl`), `decrypt_container` (giải mã từng chunk 64 KiB, IV 0 lại cho mỗi chunk),
+  `password_md5_hex` + `xor_digest` (khoá obfuscate 32 hex MD5 trong blob), `decompress_xz` (XZ qua
+  `lzma-rs`, fixture sinh bằng `python lzma`), `decrypt_and_parse`. **Chưa nối vào client** và **chưa
+  bóc framing từng file**: cần một file backup thật để xác nhận KDF/framing (`re-notes/15`, `re-notes/16`).
+- **Test:** 225 → **282** test qua (1 bỏ qua).
 
 ### Sửa lỗi
 

@@ -11,14 +11,15 @@
 > **Còn lại của Đợt 2:** ACK hàng đợi (cần bằng chứng), retention cho `messages`/`raw_json` (chỉ nén,
 > không xoá), chặn id `out_*`/`local_*` khi xoá/thu hồi, `threads_cache.json` ghi toàn bộ mỗi vòng,
 > TUI chưa có cuộc gọi/reaction realtime.
-> **Đợt 3 (Phần B):** B3.3 đã **chốt định dạng** (`re-notes/15`): header `ZDB4.0` + XXH32 + danh sách
-> file, KDF = password zero-pad 32 byte (không băm), AES-256-CBC **IV 0 cho từng chunk 64 KiB**, padding
-> chỉ căn khối (không bóc), MD5 băm **luồng nén**, thứ tự giải mã→header→giải nén XZ. Phía mã đã có
-> **module `src/sync_v1/format.rs`** (XXH32 có vector chuẩn, `parse_header`, `derive_key`,
-> `decrypt_cbc_*` với vector NIST SP 800-38A) — **chưa nối** vào client và **chưa có XZ**.
-> Bước còn lại: cần **một file backup thật** (người dùng đồng ý chạy "Đồng bộ từ điện thoại") để xác
-> nhận KDF/đóng gói payload, và đọc nốt framing payload + lớp XOR của V1; sau đó mới viết `decrypt()`
-> hoàn chỉnh (XZ dùng `xz2`/`lzma-rs`).
+> **Đợt 3 (Phần B):** B3.3 đã **chốt định dạng + framing** (`re-notes/15`, `re-notes/16`): header
+> `ZDB4.0` + XXH32 + danh sách file; KDF = password zero-pad 32 byte (không băm); AES-256-CBC **IV 0
+> cho từng chunk 64 KiB**; padding chỉ căn khối; MD5 băm **luồng nén**; mỗi hội thoại một blob
+> (`u32` + 32 hex MD5 bị XOR bằng `MD5(password)` + 32 B + 16 B + 16 B + khối 16 B); thứ tự
+> giải mã→header→giải nén XZ. Phía mã: **module `src/sync_v1/format.rs`** (13 test: XXH32 vector chuẩn,
+> `parse_header`, `derive_key`, `decrypt_container` chunk 64 KiB, `password_md5_hex`/`xor_digest`,
+> `decompress_xz` qua `lzma-rs`, `decrypt_and_parse`; vector NIST SP 800-38A đối chiếu `openssl`) —
+> **chưa nối** vào client. Bước còn lại: cần **một file backup thật** để xác nhận KDF + framing, rồi
+> mới viết `pull_mobile_msg` (cần quyết định crate RSA vì `rsa` có advisory).
 > **Cập nhật 2026-11-03:**
 > - v0.1.3 đã phát hành: thả cảm xúc khi rê chuột, reaction theo thời gian thực, đếm cộng dồn giống Zalo (`CHANGELOG.md`, `re-notes/10` §17–19). Việc này nằm ngoài kế hoạch: người dùng yêu cầu.
 > - **Phần B đang làm:** B3.1 và B3.2 đã xong (`re-notes/11_sync_v1.md`). **Việc tiếp theo là B3.3.** Script đọc `app.asar`: `scripts/re/asar_map.py`, `scripts/re/asar_snip.py`.
