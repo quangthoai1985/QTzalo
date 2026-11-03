@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
@@ -38,6 +38,10 @@ use crate::logger::{self, FindingLevel};
 use crate::session::Session;
 
 const POLL_SECS: u64 = 4;
+
+/// Minimum spacing between two writes of the sync cursors; the GUI worker uses the same 2 s
+/// (a long poll every [`POLL_SECS`] would otherwise rewrite the file nearly every time).
+const SYNC_SAVE_SECS: u64 = 2;
 
 /// Quick-reaction palette for keys `1`..`6`, same order as the GUI picker.
 const QUICK_REACTIONS: [&str; 6] = ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F606}", "\u{1F62E}", "\u{1F622}", "\u{1F620}"];
@@ -150,6 +154,32 @@ enum BgEvent {
     ActionFailed(String),
 }
 
+/// Sync cursors restored for the account of `session`, or a fresh (never saved) state when
+/// nobody is logged in. Kept out of the constructor so it is testable without a terminal.
+fn sync_state_from_session(session: &Session) -> crate::sync_state::SyncState {
+    let uin = session
+        .login
+        .as_ref()
+        .map(|l| l.uin.clone())
+        .unwrap_or_default();
+    crate::sync_state::SyncState::load(&uin)
+}
+
+/// The cursors to write for `uin`, or `None` when `uin` is not an account id (empty or not
+/// ASCII digits): a logged-out TUI must not create a cursor file.
+fn sync_state_for_save(
+    uin: &str,
+    poll: &chat::PollState,
+    ws_queues: &std::collections::BTreeMap<String, chat::QueueCursor>,
+) -> Option<crate::sync_state::SyncState> {
+    // `sanitize_uin` also trims, so the stored `uin` matches the one a later `load` compares.
+    let uin = crate::sync_state::sanitize_uin(uin)?;
+    let mut st = crate::sync_state::SyncState::new(uin);
+    st.poll = poll.clone();
+    st.ws_queues = ws_queues.clone();
+    Some(st)
+}
+
 pub struct TuiApp<'a> {
     pub session: &'a mut Session,
     pub threads: Vec<Thread>,
@@ -160,7 +190,14 @@ pub struct TuiApp<'a> {
     pub status: String,
     pub should_quit: bool,
     pub store: Option<crate::store::MessageStore>,
-    pub poll_state: chat::PollState,
+    /// Saved sync cursors of this account (`sync_state_<uin>.json`): the long-poll
+    /// `lastActionId` of every queue plus the socket queue cursors, so a restart resumes where
+    /// the previous run stopped instead of re-downloading the whole backlog.
+    sync: crate::sync_state::SyncState,
+    /// Cursor snapshot already written to disk (`None` = nothing written in this run yet).
+    sync_saved: Option<crate::sync_state::SyncState>,
+    /// Earliest instant the next debounced write may happen (`None` = no write pending).
+    sync_due: Option<Instant>,
     filtered: Vec<usize>,
     filter: FilterTab,
     search: String,
@@ -190,6 +227,10 @@ impl<'a> TuiApp<'a> {
             let _ = st.hydrate_threads(&mut threads, 200);
         }
 
+        // Cursors of the signed-in account, so the very first poll continues from the saved
+        // `lastActionId` instead of pulling the whole queue from `1`.
+        let sync = sync_state_from_session(session);
+
         let (tx, rx) = channel();
 
         let mut app = Self {
@@ -202,7 +243,9 @@ impl<'a> TuiApp<'a> {
             status: "San sang".into(),
             should_quit: false,
             store,
-            poll_state: chat::PollState::default(),
+            sync,
+            sync_saved: None,
+            sync_due: None,
             filtered: Vec::new(),
             filter: FilterTab::All,
             search: String::new(),
@@ -489,13 +532,50 @@ impl<'a> TuiApp<'a> {
         });
     }
 
+    /// Persist the sync cursors once the [`SYNC_SAVE_SECS`] window has passed. Called from the
+    /// render loop, so several polls inside one window cost a single file write.
+    fn maybe_save_sync(&mut self) {
+        let Some(due) = self.sync_due else {
+            return;
+        };
+        if Instant::now() >= due {
+            self.save_sync_now();
+        }
+    }
+
+    /// Write the sync cursors now (also called on exit). Failures are logged, never fatal: a lost
+    /// write only costs a full backlog pull on the next start.
+    fn save_sync_now(&mut self) {
+        self.sync_due = None;
+        let uin = self
+            .session
+            .login
+            .as_ref()
+            .map(|l| l.uin.clone())
+            .unwrap_or_default();
+        let Some(mut st) = sync_state_for_save(&uin, &self.sync.poll, &self.sync.ws_queues) else {
+            return;
+        };
+        // `updated_at_ms` changes on every write, so compare the cursors themselves.
+        if let Some(saved) = &self.sync_saved {
+            if saved.uin == st.uin && saved.poll == st.poll && saved.ws_queues == st.ws_queues {
+                return;
+            }
+        }
+        st.updated_at_ms = crate::timefmt::now_ms();
+        match st.save() {
+            Ok(()) => self.sync_saved = Some(st),
+            Err(e) => logger::log_error("tui::sync_state", &e.to_string()),
+        }
+    }
+
     fn spawn_poll(&mut self) {
         if self.poll_inflight || self.session.login.is_none() {
             return;
         }
         self.poll_inflight = true;
         let session = self.session_clone();
-        let mut state = self.poll_state.clone();
+        let mut state = self.sync.poll.clone();
         let mut threads = self.threads.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
@@ -931,9 +1011,26 @@ impl<'a> TuiApp<'a> {
     fn run_confirm(&mut self, action: ConfirmAction) {
         match action.kind {
             ConfirmKind::Logout => {
+                // The cursors belong to the session that ends here (same rule as the GUI worker,
+                // `gui/worker.rs` "Cursors belong to the session that ends here"): read the uin
+                // before `logout()` clears it, delete the file, then reset the in-memory cursor
+                // so a later login starts from `lastActionId = 1` again.
+                let uin = self
+                    .session
+                    .login
+                    .as_ref()
+                    .map(|l| l.uin.clone())
+                    .unwrap_or_default();
                 let _ = std::fs::remove_file(crate::paths::session_file());
                 let _ = std::fs::remove_file(crate::paths::threads_cache_file());
+                if let Some(path) = crate::paths::sync_state_file(&uin) {
+                    let _ = std::fs::remove_file(path);
+                }
                 self.session.logout();
+                // Default cursor, and nothing of the old account may be written on exit.
+                self.sync = crate::sync_state::SyncState::new("");
+                self.sync_saved = None;
+                self.sync_due = None;
                 self.threads.clear();
                 self.filtered.clear();
                 self.list_state.select(None);
@@ -1239,7 +1336,12 @@ impl<'a> TuiApp<'a> {
     }
 
     fn apply_polled(&mut self, polled: Vec<Thread>, state: chat::PollState) -> bool {
-        self.poll_state = state;
+        // Keep the long-poll cursor in the persisted sync state; the debounced writer picks it
+        // up from the render loop.
+        if self.sync.poll != state {
+            self.sync.poll = state;
+            self.sync_due = Some(Instant::now() + Duration::from_secs(SYNC_SAVE_SECS));
+        }
         let current_id = self.current_thread().map(|t| t.id.clone());
 
         let mut old: HashMap<String, (HashSet<String>, i64, usize, String)> = HashMap::new();
@@ -1442,6 +1544,10 @@ pub async fn run_tui(mut app: TuiApp<'_>) -> Result<()> {
 
     let result = run_loop(&mut terminal, &mut app).await;
 
+    // Persist the cursor even when the loop ended with an error, so the next start resumes from
+    // the last seen action id instead of re-pulling the whole queue.
+    app.save_sync_now();
+
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -1456,10 +1562,13 @@ async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut TuiApp<'_>,
 ) -> Result<()> {
-    let mut last_poll = std::time::Instant::now();
+    // The TUI owns the sync cursor now, so the first poll can run right away: it is a cheap
+    // catch-up from the saved `lastActionId`, not a full backlog download.
+    let mut next_poll = Instant::now();
 
     while !app.should_quit {
         app.check_background_events();
+        app.maybe_save_sync();
         terminal.draw(|f| ui_draw(f, app))?;
 
         if event::poll(Duration::from_millis(30))? {
@@ -1472,8 +1581,8 @@ async fn run_loop(
             }
         }
 
-        if last_poll.elapsed() >= Duration::from_secs(POLL_SECS) {
-            last_poll = std::time::Instant::now();
+        if Instant::now() >= next_poll {
+            next_poll = Instant::now() + Duration::from_secs(POLL_SECS);
             app.spawn_poll();
         }
     }
@@ -2600,7 +2709,9 @@ mod tests {
             status: "test".into(),
             should_quit: false,
             store: None,
-            poll_state: chat::PollState::default(),
+            sync: crate::sync_state::SyncState::new(""),
+            sync_saved: None,
+            sync_due: None,
             filtered: vec![0],
             filter: FilterTab::All,
             search: String::new(),
@@ -2626,5 +2737,41 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| ui_draw(f, &mut app)).unwrap();
         assert!(app.msg_ranges.len() >= 2);
+    }
+
+    #[test]
+    fn tui_without_login_starts_from_a_fresh_cursor() {
+        let session = crate::session::Session::new(false, false, false).unwrap();
+        assert_eq!(sync_state_from_session(&session), crate::sync_state::SyncState::new(""));
+    }
+
+    #[test]
+    fn sync_cursor_is_only_saved_for_digit_uins() {
+        let poll = chat::PollState::default();
+        let ws = std::collections::BTreeMap::new();
+        for bad in ["", "  ", "../1", "12a", "１２３"] {
+            assert!(sync_state_for_save(bad, &poll, &ws).is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn sync_save_keeps_poll_and_socket_cursors() {
+        let mut poll = chat::PollState::default();
+        poll.last_action_id = "14489176548854".into();
+        poll.queues.insert(
+            "1".into(),
+            chat::QueueCursor { last_id: "42".into(), ids: vec!["41".into()] },
+        );
+        let mut ws = std::collections::BTreeMap::new();
+        ws.insert(
+            "510_1".into(),
+            chat::QueueCursor { last_id: "8440948595701".into(), ids: Vec::new() },
+        );
+
+        let st = sync_state_for_save(" 12345 ", &poll, &ws).expect("digit uin");
+
+        assert_eq!(st.uin, "12345", "stored uin must match what `load` compares");
+        assert_eq!(st.poll, poll);
+        assert_eq!(st.ws_queues, ws);
     }
 }

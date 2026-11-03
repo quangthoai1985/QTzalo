@@ -62,6 +62,20 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Keep the on-disk media cache bounded (see `paths::trim_cache_dir`): Zalo PC never trims
+    // its own cache and grows by gigabytes, so QTzalo sweeps >30-day-old files and enforces a
+    // 64 MiB cap at startup. Never runs in demo mode (no real user data).
+    if !demo_mode {
+        let (freed, removed) = paths::trim_cache_dir();
+        if removed > 0 {
+            println!(
+                "✓ Đã dọn cache ảnh/video: {} mục, {}",
+                removed,
+                download::format_bytes(freed)
+            );
+        }
+    }
+
     if force_logout && !demo_mode {
         let _ = std::fs::remove_file(paths::session_file());
         let _ = std::fs::remove_file(paths::threads_cache_file());
@@ -237,7 +251,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Fetch initial threads and hydrate with local SQLite history
+    // Fetch initial threads and hydrate with local SQLite history. The TUI owns the sync cursor
+    // (`sync_state_<uin>.json`, see `tui::TuiApp`), so its first poll resumes from the saved
+    // `lastActionId` instead of pulling the whole backlog from `1`; no pre-poll here.
     let mut initial_threads = chat::load_threads_cache();
     store::load_history_into_threads(paths::history_db(), &mut initial_threads, 200);
     if s.login.is_some() {
@@ -252,11 +268,6 @@ async fn main() -> Result<()> {
                     } else {
                         initial_threads.push(ft);
                     }
-                }
-                let mut poll_state = chat::PollState::default();
-                if let Err(e) = chat::poll_new_messages(&s, &mut poll_state, &mut initial_threads).await {
-                    crate::logger::log_error("main::poll_new_messages", &e.to_string());
-                    eprintln!("! Lỗi tải tin nhắn gần nhất: {e}");
                 }
             }
             Err(e) => {
