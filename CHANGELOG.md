@@ -4,6 +4,30 @@ Mọi thay đổi đáng chú ý của QTzalo được ghi tại đây. Định 
 
 QTzalo là bản fork của [ctdozlite](https://github.com/ctdoteam1110/ctdozlite), tách ra từ commit `73849bd` (tag `v0.0.2` của upstream).
 
+## [Unreleased]
+
+Trọng tâm: thả cảm xúc ngay khi rê chuột, và thấy cảm xúc của mọi người theo thời gian thực. Bằng chứng thu với tài khoản thật: `re-notes/10_bang_chung_dong_bo.md` §17–18.
+
+### Thêm mới
+
+- **Thả cảm xúc khi rê chuột:**
+  - Rê chuột vào tin thì hiện một nút tròn cạnh bong bóng; bấm vào là thả 👍.
+  - Dừng chuột trên nút thì bung thanh 6 cảm xúc. Nếu bạn đã thả, thanh có thêm nút ✕ để gỡ.
+- **Chip cảm xúc:** đếm theo số người; rê lên chip thì hiện chi tiết, ví dụ "❤️ 2 · 😆 1 — có bạn".
+- **Cảm xúc theo thời gian thực:**
+  - Cảm xúc của người khác, và của chính bạn thả từ điện thoại, hiện ngay (socket `612`).
+  - Cảm xúc thả lúc QTzalo tắt được bù khi mở app (queue `610`/`611` và `lp_control`).
+
+### Sửa lỗi
+
+- Thả cảm xúc không còn xoá cảm xúc của người khác trên cùng tin.
+- Bấm lại đúng cảm xúc đang chọn thì không gửi gì nữa. Trước đây app xoá cảm xúc trên máy nhưng vẫn gửi lệnh thả lên máy chủ.
+- `lp_control` (kênh dự phòng cho sự kiện cuộc gọi): khi danh sách id của queue dài, mọi lần kéo sau lần đầu đều bị máy chủ trả 413. Nay QTzalo chỉ gửi 10 id mới nhất, như Zalo PC.
+
+### Ghi chú
+
+- Cảm xúc được lưu theo dạng mới (từng người). Nếu quay lại bản 0.1.2, cache hội thoại sẽ bị bỏ qua; lịch sử trong SQLite vẫn còn.
+
 ## [0.1.2] - 2026-11-02
 
 Trọng tâm: mở QTzalo sau một thời gian tắt máy thì tin nhắn tự đồng bộ đủ như trên điện thoại. Mọi thay đổi dựa trên bằng chứng thu với tài khoản thật (`re-notes/10_bang_chung_dong_bo.md`).
@@ -194,6 +218,7 @@ Phiên bản đầu tiên của QTzalo.
 - Thêm `docs/CAI_DAT.md` (hướng dẫn cài đặt, xử lý SmartScreen), `docs/SECURITY_AUDIT.md` (kết quả rà soát), `SECURITY.md`.
 - Bổ sung `docs/KHAC_PHUC_SU_CO.md`: font, phiên đăng nhập, giờ hiển thị.
 
+[Unreleased]: https://github.com/quangthoai1985/QTzalo/compare/v0.1.2...HEAD
 [0.1.2]: https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.2
 [0.1.1]: https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.1
 [0.1.0]: https://github.com/quangthoai1985/QTzalo/releases/tag/v0.1.0

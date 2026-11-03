@@ -39,6 +39,7 @@ Tài liệu tóm tắt các tùy chọn dòng lệnh, thao tác trên giao diệ
   - Tab **Tìm kiếm** tự động tìm nhãn dán ngay khi gõ từ khóa mà không cần bấm Enter.
   - Tab **Kho nhãn** cho phép duyệt và ghim các bộ nhãn dán từ máy chủ Zalo.
 - **Tương tác trên tin nhắn:**
+  - Rê chuột vào bong bóng tin nhắn để thả cảm xúc: bấm nút tròn hiện cạnh bong bóng để thả 👍, hoặc dừng chuột trên nút để chọn 1 trong 6 cảm xúc. Bấm ✕ trên thanh đó để gỡ cảm xúc của bạn. Rê lên chip cảm xúc dưới tin để xem mỗi cảm xúc có bao nhiêu người thả.
   - Nhấp chuột phải vào bong bóng tin nhắn để thả cảm xúc (reaction), trả lời trích dẫn, chuyển tiếp, sao chép nội dung, ghim, đánh dấu sao, thu hồi tin nhắn với mọi người hoặc xóa ở phía cá nhân.
   - Hỗ trợ dán ảnh trực tiếp từ clipboard (`Ctrl+V` / `Cmd+V`) vào khung chat.
 

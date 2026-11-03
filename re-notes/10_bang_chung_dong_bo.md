@@ -211,6 +211,28 @@ mỗi phần tử:
 - `get-last-msgs` có thêm `clearUnreadsReact` (43 hội thoại, cùng dạng `clearUnreads`).
 - **Chưa thấy:** đổi cảm xúc, gỡ cảm xúc, và reaction do QTzalo gửi đi (trong lượt b không có lệnh `POST …/reaction`). Ý nghĩa của `msgSender` **[U]**. Theo thư viện mã nguồn mở zca-js, gỡ cảm xúc là `rIcon = ""` kèm `rType = -1` **[I]**.
 
+## Nghiệm thu v0.1.3 — reaction (03/11, 20:14–20:33)
+
+Hai lượt chạy với tài khoản thật, `ZCALL_WS_TRACE=1`. Người dùng thao tác trên điện thoại và trong QTzalo.
+
+### 18. Thả, gỡ cảm xúc hai chiều; `lp_control` bị 413 [O]
+
+**Lượt A** (bản `e5ea256`, 20:15–20:24)
+- Khi mở app, `610_1` trả 50 + 4 `reacts`, `611_1` trả 50 + 50 + 31 `reactGroups` (dồn lại từ lần chạy trước).
+- QTzalo thả 😮: `POST …/api/message/reaction` trả `error_code 0`, và ngay sau đó có một `612_0` với `uidFrom = "0"`, `rIcon` dài 2 ký tự. → Máy chủ **gửi lại** cho QTzalo cả reaction do chính QTzalo thả. Mục `set_mine` (`ts = 0`) vì vậy được chốt bằng `ts` thật.
+- **`lp_control`: mọi lần kéo sau lần đầu đều 413 Payload Too Large** (khoảng 5 giây một lần, suốt 9 phút).
+  - Lần kéo đầu (`lastActionId = 1`) có `queueStatus` của các queue `5`, `14`, `17`, mỗi queue 50 `ids`. `CtrlPollState` gửi lại cả 150 id trong URL.
+  - Ngày 02/11 vẫn chạy được vì danh sách ngắn hơn (khoảng 126 id).
+  - Sửa ở `fc39dbf`: chỉ gửi tối đa 10 id mới nhất `≤ lastId`, như `QueueControl.getLastActionIdsArray` của Zalo PC. Quy tắc này nay là `chat::newest_action_ids`, dùng chung cho cả hai long-poll.
+- Người dùng xác nhận reaction hiện đúng **cả hai chiều**: thả trên điện thoại thì QTzalo cập nhật, thả trong QTzalo thì điện thoại cập nhật.
+
+**Lượt B** (bản `fc39dbf`, 20:29–20:33)
+- `lp_control`: 9 lần kéo thành công, **0 lần 413**.
+- Khi mở app, `610_1`/`611_1` có `reacts` rỗng: con trỏ đã lưu của queue reaction được chấp nhận, không phát lại.
+- QTzalo bấm ✕: `POST` (`rIcon: ""`, `rType: -1`) trả `error_code 0`, rồi có `612` với `rIcon` dài 0 ký tự. QTzalo thả lại: `612` với `rIcon` dài 2.
+- Điện thoại gỡ rồi thả: thêm hai `612` (`rIcon` dài 0, rồi dài 2), `uidFrom = "0"`, không có `POST` nào từ QTzalo.
+- → **Gỡ cảm xúc là `rIcon = ""`: xác nhận** (trước đây ghi [I] theo zca-js). Mỗi thao tác thả hoặc gỡ là một sự kiện `612` riêng.
+
 ## Kết luận theo giả thiết
 
 | Giả thiết (nguồn) | Kết luận |
@@ -228,3 +250,5 @@ mỗi phần tử:
 | PC nhận `temp_key` sau đăng nhập QR (Phần B) | **Xác nhận**: `transfer_after_login` / `transfer_sync2` trong `603_1` |
 | Kéo với `lastId` đã lưu chỉ trả phần mới (A1) | **Xác nhận**: không có tin mới → 0 tin (lượt 5); có 3 tin mới → đúng 3 tin (A7) |
 | Reaction đến qua socket `612` lúc mở app và qua `610_1/611_1` lúc tắt (v0.1.3) | **Xác nhận** `612` và `610_1` (§17); `611_1` chưa có dữ liệu. `lp_control` cũng trả reaction từ lúc đăng nhập |
+| Gỡ cảm xúc là `rIcon = ""`, `rType = -1` (zca-js) | **Xác nhận** (§18): máy chủ nhận và phát lại `612` có `rIcon` rỗng, cả khi gỡ từ QTzalo lẫn từ điện thoại |
+| `lp_control` gửi lại mọi `ids` của queue | **Bác bỏ**: phải giữ tối đa 10 id mới nhất, nếu không sẽ bị 413 khi danh sách dài (§18) |
