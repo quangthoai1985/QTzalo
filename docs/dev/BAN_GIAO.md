@@ -110,19 +110,6 @@ thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.m
     tự chạy lúc khởi động khi DB > 32 MiB.
   - Test: **265 pass / 1 ignored**; `cargo check --all-targets` 0 warning; MSRV 1.88 sạch;
     `cargo audit` 0 lỗ hổng (2 unmaintained).
-- **Tồn đọng còn lại (ưu tiên giảm dần):**
-  1. Chưa ACK hàng đợi (`DELETE_QUEUE_ACK_*`) — cần bằng chứng thật, ACK sai mất tin.
-  2. Chưa có retention cho `messages`/`raw_json` (chỉ nén, không xoá — đúng ý người dùng).
-  3. `delete_message_for_me`/`recall_message` chưa chặn `msg.id` `out_*`/`local_*` (GUI đang chặn).
-  4. `threads_cache.json` vẫn ghi toàn bộ lịch sử mỗi vòng.
-  5. TUI chưa có cuộc gọi/reaction realtime; nav "Khác"/"Trò chuyện ẩn"/zCloud vẫn là "sắp có".
-  6. **Phần B:** đã có bộ đọc sự kiện transfer + bản đồ nhị phân `db-cross-v4`, nhưng chưa có
-     `pull_mobile_msg`/RSA/tải/giải mã; còn thiếu Ghidra để chốt header/KDF/cipher.
-- **Việc tiếp theo:** (a) chạy bản `--dev` với trace để thu `act_type` thật của 4 sự kiện transfer
-  (đây là dữ liệu duy nhất còn thiếu cho B6.2); (b) cài Ghidra, đọc 4 con trỏ N-API ở `0x103334`,
-  hàm header `0x1AA00`, crypto `0x25980`, wrapper nén `0x3F5F0`/`0x43350`; (c) sau đó mới viết
-  `sync_v1` bằng Rust. **Không** gọi `pull_mobile_msg` khi chưa hỏi người dùng (hành động thật trên
-  tài khoản, có nguy cơ khoá bảo mật).
 - **Bài học phiên này (bổ sung):** khi UI có 28 công tắc mà chỉ 8 cái có tác dụng, cách rẻ nhất để
   trung thực là disable + nhãn "(sắp có)" thay vì xoá — vẫn giữ lộ trình và không phá cài đặt đã lưu.
   Với E2EE, chỉ nhận diện theo trường tường minh; mọi suy đoán từ nội dung/độ dài đều có nguy cơ
@@ -144,24 +131,40 @@ thống nhất. Báo cáo đầy đủ: `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.m
     và thứ tự nén↔mã hoá (hàm giải mã `0x29680` không có call site trực tiếp).
   - Test: **268 pass / 1 ignored**; `cargo check --all-targets` 0 warning; MSRV 1.88 sạch;
     `cargo audit` 0 lỗ hổng (2 unmaintained).
+- **Đã sửa vòng 5 (Đợt 2 nốt + B3.3 chốt định dạng):**
+  - **Nút "Dọn dẹp ngay"** trong *Cài đặt → Dữ liệu & làm mới*: `WorkerCmd::RunMaintenance` chạy nền
+    (`paths::trim_cache_dir` + `MessageStore::compact_if_needed(0)`), `GuiEvent::MaintenanceDone` báo
+    dung lượng đã giải phóng; không xoá tin, chống bấm lặp bằng trạng thái đo dung lượng.
+  - **Xoá/thu hồi dùng `cliMsgId` thật** (`chat::message_client_id`: ưu tiên `cli_msg_id` > 0, fallback
+    `ts`, cả hai thiếu → `Err`), bỏ hẳn fallback `now`. **Cần smoke-test tài khoản thật**: xoá 1 tin
+    mình gửi, 1 tin nhận được, thu hồi 1 tin mình gửi (server có thể ưu tiên `globalMsgId`, chưa chứng minh).
+  - **B3.3 chốt định dạng** (`re-notes/15`, 188 dòng): header = magic `"ZDB4.0"` (6 B) + `u32 BE` tổng
+    dài header + `u32 BE` **XXH32 seed 0** của `[0x0E, A)` + `u32 BE nfile` + `nfile × {u32 BE nameLen
+    ≤0x80, name, u32 BE size ≤2e9}`; **KDF không biến đổi** (key = 32 byte đầu của `password` zero-pad
+    vào 256 B; không gọi MD5/SHA); **AES-256-CBC, IV 16 byte 0, PKCS#7**; **thứ tự: giải mã tại chỗ
+    từng chunk 64 KiB → parse header → giải nén XZ**; V1 chỉ giải nén + MD5 (không dùng AES); MD5 băm
+    payload (nghi luồng nén) — còn [U]; `0x29680` là dead code (0 xref).
+  - Test: **269 pass / 1 ignored**; `cargo check --all-targets` 0 warning; MSRV 1.88 sạch;
+    `cargo audit` 0 lỗ hổng (2 unmaintained).
 - **Tồn đọng còn lại (ưu tiên giảm dần):**
   1. Chưa ACK hàng đợi (`DELETE_QUEUE_ACK_*`) — cần bằng chứng thật, ACK sai mất tin.
   2. Chưa có retention cho `messages`/`raw_json` (chỉ nén, không xoá — đúng ý người dùng).
-  3. `delete_message_for_me`/`recall_message` vẫn fallback `cliMsgId = now` khi `ts <= 0` (nên chặn
-     như `quote_target_ids`).
+  3. **Phần B:** còn [U] MD5 băm luồng nén hay đã giải nén và IV khi file >64 KiB; chưa có
+     `pull_mobile_msg`/RSA/tải/giải mã. Cần **một file backup thật** để xác nhận KDF trước khi viết code.
   4. TUI: chưa có cuộc gọi, chưa hiện "đang nhập"; nav "Khác"/"Trò chuyện ẩn"/zCloud vẫn "sắp có".
-  5. **Phần B:** đã có bộ đọc sự kiện transfer + bản đồ nhị phân + disassemble; nhưng chưa có
-     `pull_mobile_msg`/RSA/tải/giải mã, và **chưa chốt KDF + layout header**.
-- **Việc tiếp theo:** (a) đọc trọn `0x28470` (1.109 lệnh) + `0x29680` (287 lệnh) và tìm con trỏ hàm
-  gọi `0x29680` trong `.data` để chốt thứ tự nén↔mã hoá; (b) đọc `0x1AE00` từ `0x1AF30`→`0x1B8BB` để
-  lấy layout header byte chính xác; (c) đọc `0x27890` xem 32 byte khoá được nạp từ đâu (giải KDF).
-  Khi có đủ 3 thứ đó mới viết được `sync_v1/decrypt.rs`; **vẫn không** gọi `pull_mobile_msg` khi chưa
-  được người dùng đồng ý (hành động thật trên tài khoản).
+  5. Cần smoke-test tài khoản thật cho: xoá/thu hồi bằng `cliMsgId`, `typing`, reaction trong nhóm.
+- **Việc tiếp theo (Phần B, còn rất gần):** (1) đọc `0x286E0–0x28A40` để chốt MD5 băm luồng nén hay
+  đã giải nén; (2) đọc vòng CBC `0x26BD0–0x26C0F` để chốt IV khi file >64 KiB; (3) có **một file backup
+  thật** (cần người dùng đồng ý chạy "Đồng bộ từ điện thoại" trên Zalo PC chính thức) rồi thử
+  `password[..32]` + AES-256-CBC IV 0 → nếu 6 byte đầu ra `"ZDB4.0"` là xác nhận KDF; thử thêm
+  `hex::decode(privateKey)`, `md5(password)`, `to_uppercase()`. Khi xác nhận xong mới viết
+  `sync_v1/decrypt.rs` bằng Rust (XZ dùng crate `xz2`/`lzma-rs`).
 - **Bài học phiên này (bổ sung 2):** công cụ có sẵn trong toolchain đôi khi đủ mạnh — `dumpbin` của
   VS Build Tools thay được Ghidra cho việc đọc hàm theo địa chỉ. Khi dumpbin cắt cột byte ở 6 byte,
   phải suy độ dài lệnh từ **địa chỉ dòng kế tiếp**, nếu không sẽ lệch và bỏ sót lệnh (đã làm hỏng
   một vòng phân tích trước khi phát hiện).
-- **Bài học phiên này:**  - Đọc lại mã nguồn bằng kiểm toán độc lập tìm ra 3 lỗi "âm thầm" mà test cũ không bắt: nạp tin cũ
+- **Bài học phiên này:**
+  - Đọc lại mã nguồn bằng kiểm toán độc lập tìm ra 3 lỗi "âm thầm" mà test cũ không bắt: nạp tin cũ
     nhất, video call thành audio, `status_msg` không render. Test xanh không có nghĩa là hành vi đúng
     nếu không có test cho đúng chiều dữ liệu.
   - Nhiều agent sửa song song thì phải chia theo **file** và giữ "điểm nối" (enum, hàm API) ở một người;

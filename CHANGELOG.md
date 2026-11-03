@@ -70,7 +70,11 @@ và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, ch
   từ chối id rỗng/`out_*`/`local_*` kèm thông điệp tiếng Việt, thay vì gửi id vô nghĩa.
 - **Giảm ghi đĩa:** `chat::save_threads_cache` chỉ ghi khi nội dung thực sự đổi (so hash trong
   process + kiểm file tồn tại), không còn serialize/ghi toàn bộ lịch sử mỗi vòng.
-- **Test:** 225 → **268** test qua (1 bỏ qua).
+- **Nút "Dọn dẹp ngay"** trong *Cài đặt → Dữ liệu & làm mới*: dọn cache ảnh/video (tệp >30 ngày, giữ
+  ≤64 MiB) và nén CSDL lịch sử (WAL checkpoint + VACUUM) ngay, không cần khởi động lại, không xoá tin.
+- **Xoá/thu hồi dùng `cliMsgId` thật của tin** (trước luôn gửi `ts` ms, và gửi `now` khi thiếu `ts`);
+  nếu tin không có cả `cliMsgId` lẫn thời điểm gửi thì từ chối với lỗi tiếng Việt thay vì gửi id bịa.
+- **Test:** 225 → **269** test qua (1 bỏ qua).
 
 ### Sửa lỗi
 
@@ -106,9 +110,11 @@ và giới hạn dung lượng cache trên đĩa. **Chưa tăng phiên bản, ch
 - Thêm `docs/dev/BAO_CAO_KIEM_TOAN_2026-11-03.md` (báo cáo kiểm toán đầy đủ),
   `re-notes/12_zalo-electron-va-dung-luong.md` (vì sao Zalo Electron ổn định nhưng phình dung lượng,
   số đo thật trên máy và bài học cho QTzalo), `re-notes/13_db_cross_v4.md` (bản đồ PE của module
-  `db-cross-v4`) và `re-notes/14_db_cross_v4_disasm.md` (disassemble bằng `dumpbin`: sửa địa chỉ
-  4 hàm N-API, chốt magic header **`ZDB4.0`** big-endian, **AES-256 + PKCS#7**, **liblzma/XZ**;
-  KDF và thứ tự nén↔mã hoá vẫn **[U]**).
+  `db-cross-v4`), `re-notes/14_db_cross_v4_disasm.md` (disassemble bằng `dumpbin`: sửa địa chỉ
+  4 hàm N-API, chốt magic header **`ZDB4.0`** big-endian, **AES-256 + PKCS#7**, **liblzma/XZ**) và
+  `re-notes/15_db_cross_v4_decrypt.md` (**chốt định dạng**: layout header byte, hash header **XXH32**,
+  **KDF = password zero-pad 32 byte**, **AES-256-CBC IV 0**, thứ tự **giải mã → parse header → giải nén**,
+  kèm pseudocode Rust; MD5 payload và IV nhiều chunk còn **[U]**).
 
 ## [0.1.3] - 2026-11-03
 
