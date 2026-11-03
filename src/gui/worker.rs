@@ -108,6 +108,9 @@ pub enum WorkerCmd {
     /// Delete the contents of `paths::cache_dir()` (`stickers_cache/` only) →
     /// `GuiEvent::ImageCacheCleared`.
     ClearImageCache,
+    /// Trim the image/video cache (30 days / 64 MiB) and compact the history DB now →
+    /// `GuiEvent::MaintenanceDone`. Never deletes messages.
+    RunMaintenance,
     StartCall {
         partner_id: String,
         partner_name: String,
@@ -2336,6 +2339,28 @@ pub(super) fn spawn_session_worker(session: Session, gui_tx: Sender<GuiEvent>, e
                                     crate::download::clear_dir_contents(&crate::paths::cache_dir());
                                 let _ = gui_tx_clone
                                     .send(GuiEvent::ImageCacheCleared { freed, failed });
+                                ctx_clone.request_repaint();
+                            });
+                        }
+                        WorkerCmd::RunMaintenance => {
+                            let gui_tx_clone = gui_tx.clone();
+                            let ctx_clone = egui_ctx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                // Applies the on-disk policy from `re-notes/12`: bound the media
+                                // cache (30 days / 64 MiB) and compact the history DB. Neither step
+                                // deletes a message.
+                                let (freed_bytes, removed_files) = crate::paths::trim_cache_dir();
+                                let db_compacted = crate::store::MessageStore::open(
+                                    crate::paths::history_db(),
+                                )
+                                .ok()
+                                .and_then(|s| s.compact_if_needed(0).ok())
+                                .unwrap_or(false);
+                                let _ = gui_tx_clone.send(GuiEvent::MaintenanceDone {
+                                    freed_bytes,
+                                    removed_files,
+                                    db_compacted,
+                                });
                                 ctx_clone.request_repaint();
                             });
                         }

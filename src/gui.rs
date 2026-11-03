@@ -174,6 +174,12 @@ pub enum GuiEvent {
     },
     /// Size in bytes of `paths::cache_dir()`.
     CacheSizeComputed(u64),
+    /// Manual maintenance finished: cache trimmed and history DB compacted.
+    MaintenanceDone {
+        freed_bytes: u64,
+        removed_files: usize,
+        db_compacted: bool,
+    },
     ImageCacheCleared {
         freed: u64,
         failed: usize,
@@ -1081,6 +1087,22 @@ impl ZaloGuiApp {
                 GuiEvent::CacheSizeComputed(bytes) => {
                     self.cache_size = Some(bytes);
                     self.cache_size_loading = false;
+                }
+                GuiEvent::MaintenanceDone {
+                    freed_bytes,
+                    removed_files,
+                    db_compacted,
+                } => {
+                    let freed = crate::download::format_bytes(freed_bytes);
+                    let db = if db_compacted { " · đã nén CSDL lịch sử" } else { "" };
+                    self.show_toast(format!(
+                        "Đã dọn {removed_files} mục trong cache ({freed}){db}."
+                    ));
+                    self.cache_size = None;
+                    self.cache_size_loading = true;
+                    if let Some(tx) = WORKER_TX.get() {
+                        let _ = tx.send(WorkerCmd::ComputeCacheSize);
+                    }
                 }
                 GuiEvent::ImageCacheCleared { freed, failed } => {
                     // Drop decoded images so they are fetched again; keep live call video.

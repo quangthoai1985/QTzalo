@@ -875,6 +875,7 @@ impl ZaloGuiApp {
         let mut open_data_dir = false;
         let mut refresh_cache_size = false;
         let mut ask_clear_cache = false;
+        let mut run_maintenance = false;
         let cache_label = if demo {
             // Fixed sample value: demo mode never reads or deletes the real data folder.
             "48,2 MB".to_string()
@@ -1372,6 +1373,42 @@ impl ZaloGuiApp {
                                                         });
                                                     });
                                                 });
+                                            ui.add_space(14.0);
+
+                                            ui.label(RichText::new("Dọn dẹp cache & cơ sở dữ liệu").color(pal.text_primary).size(13.5).strong());
+                                            ui.add_space(6.0);
+                                            egui::Frame::none()
+                                                .fill(pal.bg_elevated)
+                                                .stroke(Stroke::new(1.0_f32, pal.border))
+                                                .rounding(Rounding::same(10.0))
+                                                .inner_margin(Margin::same(14.0))
+                                                .show(ui, |ui| {
+                                                    ui.vertical(|ui| {
+                                                        ui.label(RichText::new("Xoá ảnh/video cache cũ hơn 30 ngày, giữ tối đa 64 MB, và nén cơ sở dữ liệu lịch sử. Không xoá tin nhắn.").color(pal.text_primary).size(13.0));
+                                                        ui.add_space(4.0);
+                                                        ui.label(RichText::new("Đây là cùng chính sách QTzalo tự chạy lúc khởi động; bấm nút để chạy ngay. Việc dọn dẹp chạy ở tiến trình nền nên cửa sổ không bị treo.").color(pal.text_secondary).size(12.2));
+                                                        ui.add_space(10.0);
+                                                        let busy = !demo && self.cache_size_loading;
+                                                        let btn = egui::Button::new(
+                                                            RichText::new(format!("{} Dọn dẹp ngay", lucide::SPARKLES))
+                                                                .size(13.0)
+                                                                .strong()
+                                                                .color(pal.text_primary),
+                                                        );
+                                                        if ui
+                                                            .add_enabled(!busy, btn)
+                                                            .on_hover_cursor(CursorIcon::PointingHand)
+                                                            .on_hover_text(if busy {
+                                                                "Đang đo dung lượng cache hoặc đang dọn dẹp…"
+                                                            } else {
+                                                                "Dọn cache cũ và nén CSDL lịch sử ngay"
+                                                            })
+                                                            .clicked()
+                                                        {
+                                                            run_maintenance = true;
+                                                        }
+                                                    });
+                                                });
                                         }
                                         SettingsTab::Appearance => {
                                             soon_note(ui, pal);
@@ -1733,6 +1770,20 @@ impl ZaloGuiApp {
                 self.cache_size = None;
                 self.cache_size_loading = true;
                 let _ = tx.send(WorkerCmd::ComputeCacheSize);
+            }
+        }
+        if run_maintenance {
+            // Cache + database maintenance is safe by design (only old cache files are removed
+            // and the history DB is compacted), so no confirmation dialog is needed.
+            if demo {
+                self.show_toast("Chế độ demo: không dọn dữ liệu thật.");
+            } else if let Some(tx) = WORKER_TX.get() {
+                self.cache_size = None;
+                self.cache_size_loading = true;
+                let _ = tx.send(WorkerCmd::RunMaintenance);
+                self.show_toast("Đang dọn cache và nén CSDL lịch sử…");
+            } else {
+                self.show_toast("Không thể dọn dẹp (tiến trình nền đã dừng).");
             }
         }
         if ask_clear_cache {
