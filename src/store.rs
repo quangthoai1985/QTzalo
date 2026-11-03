@@ -48,6 +48,14 @@ impl MessageStore {
     /// `":memory:"` opens an in-memory database. The bare legacy name `"zalo_history.db"` is
     /// redirected to the per-user [`crate::paths::history_db`] so older call sites never create
     /// a stray copy in the working directory. The file is restricted to the owner on Unix.
+    ///
+    /// The connection switches to WAL with a 5 s busy timeout and `synchronous=NORMAL`: the GUI
+    /// worker opens its own short-lived connections on demand, and WAL lets those readers run
+    /// while another connection writes instead of failing with `database is locked` (which most
+    /// call sites swallow with `let _ =`). WAL creates `-wal`/`-shm` sidecars; they are not passed
+    /// to [`crate::paths::restrict_file`] because they inherit the private data directory
+    /// (`0700` on Unix), and only the database file itself needs `0600`. All three pragmas are
+    /// best-effort: an old/read-only/network volume must never stop the app from opening history.
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let path = resolve_db_path(path.as_ref());
         let conn = if path.as_os_str() == ":memory:" {
@@ -57,6 +65,12 @@ impl MessageStore {
             crate::paths::restrict_file(&path);
             c
         };
+
+        // Ignore failures on purpose: `:memory:` cannot use WAL (it stays `memory`), and older
+        // builds may still have the previous journal mode, which SQLite handles transparently.
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "busy_timeout", 5_000);
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -218,19 +232,31 @@ impl MessageStore {
     }
 
     /// Delete a message from local SQLite store when user selects "Xóa chỉ ở phía tôi".
+    ///
+    /// Only the exact `msg_id` is removed. The previous version also ran
+    /// `DELETE ... WHERE thread_id = ? AND ts = ?`, which deleted every message sharing that
+    /// timestamp — with `ts = 0` (unknown time) or a coarse timestamp that wiped unrelated
+    /// messages. `thread_id`/`ts` are kept in the signature for callers but are used only as a
+    /// last-resort single-row fallback when the caller has no id at all.
     pub fn delete_message(&mut self, thread_id: &str, msg_id: &str, ts: i64) -> Result<()> {
-        if !msg_id.is_empty() {
-            let _ = self.conn.execute(
-                "DELETE FROM messages WHERE msg_id = ?1",
-                params![msg_id],
-            );
+        if msg_id.is_empty() {
+            // Nothing identifies the row precisely; delete at most one matching row so messages
+            // that merely share `ts` survive.
+            if ts > 0 && !thread_id.is_empty() {
+                let _ = self.conn.execute(
+                    "DELETE FROM messages WHERE rowid = (
+                         SELECT rowid FROM messages WHERE thread_id = ?1 AND ts = ?2
+                         ORDER BY rowid DESC LIMIT 1
+                     )",
+                    params![thread_id, ts],
+                );
+            }
+            return Ok(());
         }
-        if ts > 0 && !thread_id.is_empty() {
-            let _ = self.conn.execute(
-                "DELETE FROM messages WHERE thread_id = ?1 AND ts = ?2",
-                params![thread_id, ts],
-            );
-        }
+        let _ = self.conn.execute(
+            "DELETE FROM messages WHERE msg_id = ?1",
+            params![msg_id],
+        );
         Ok(())
     }
 
@@ -253,14 +279,25 @@ impl MessageStore {
         Ok(())
     }
 
-    /// Retrieve up to `limit` messages for a thread ordered by timestamp ascending.
+    /// Retrieve up to `limit` most recent messages for a thread, ordered ascending by timestamp.
+    ///
+    /// The `LIMIT` must not sit directly on an ascending `ORDER BY`: that returns the *oldest*
+    /// rows, so a conversation with more saved messages than `limit` would hydrate its very first
+    /// messages and hide the newest ones. The inner query picks the newest `limit` rows and the
+    /// outer query restores ascending order for callers such as `hydrate_threads`, which appends
+    /// and then sorts by `ts`. `rowid` breaks ties so equal timestamps stay deterministic.
     pub fn messages_for(&self, thread_id: &str, limit: usize) -> Result<Vec<StoredMessage>> {
         let mut stmt = self.conn.prepare(
             "SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing, raw_json
-             FROM messages
-             WHERE thread_id = ?1
-             ORDER BY ts ASC
-             LIMIT ?2",
+             FROM (
+                 SELECT msg_id, thread_id, sender_id, sender_name, text, msg_type, ts, is_outgoing,
+                        raw_json, rowid AS sort_rowid
+                 FROM messages
+                 WHERE thread_id = ?1
+                 ORDER BY ts DESC, rowid DESC
+                 LIMIT ?2
+             )
+             ORDER BY ts ASC, sort_rowid ASC",
         )?;
 
         let rows = stmt.query_map(params![thread_id, limit as i64], |row| {
@@ -917,5 +954,122 @@ mod tests {
         assert_eq!(hydrated[0].name, "Test Thread");
         assert_eq!(hydrated[0].messages.len(), 2);
         assert_eq!(hydrated[0].preview, "Hi Alice");
+    }
+
+    /// A unique temporary directory for file-backed store tests (no `tempfile` dependency).
+    fn temp_db_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "qtzalo-store-{tag}-{}-{}",
+            std::process::id(),
+            crate::timefmt::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn text_message(msg_id: &str, thread_id: &str, ts: i64) -> StoredMessage {
+        StoredMessage {
+            msg_id: msg_id.into(),
+            thread_id: thread_id.into(),
+            sender_id: "u_1".into(),
+            sender_name: "Alice".into(),
+            text: format!("msg {ts}"),
+            msg_type: "chat.text".into(),
+            ts,
+            is_outgoing: false,
+            raw_json: String::new(),
+        }
+    }
+
+    /// `messages_for` must keep the newest `limit` rows, not the oldest, while still returning
+    /// them in ascending `ts` order for `hydrate_threads`.
+    #[test]
+    fn messages_for_returns_newest_rows_ascending() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let thread_id = "thread_newest";
+        for ts in 1..=250i64 {
+            store
+                .upsert_message(&text_message(&format!("n_{ts}"), thread_id, ts))
+                .unwrap();
+        }
+
+        let msgs = store.messages_for(thread_id, 200).unwrap();
+        assert_eq!(msgs.len(), 200);
+        assert_eq!(msgs.first().map(|m| m.ts), Some(51), "oldest kept row is 51");
+        assert_eq!(msgs.last().map(|m| m.ts), Some(250), "newest row is kept");
+        assert!(
+            msgs.windows(2).all(|w| w[0].ts <= w[1].ts),
+            "rows must stay ascending by ts"
+        );
+        // A limit larger than the row count still returns every row, ascending.
+        assert_eq!(store.messages_for(thread_id, 500).unwrap().len(), 250);
+        assert!(store.messages_for("thread_missing", 10).unwrap().is_empty());
+    }
+
+    /// Deleting one message must not delete another message that merely shares its `ts`.
+    #[test]
+    fn delete_message_removes_only_that_msg_id() {
+        let mut store = MessageStore::open(":memory:").unwrap();
+        let thread_id = "thread_dup_ts";
+        store
+            .upsert_message(&text_message("dup_a", thread_id, 5_000))
+            .unwrap();
+        store
+            .upsert_message(&text_message("dup_b", thread_id, 5_000))
+            .unwrap();
+
+        store.delete_message(thread_id, "dup_a", 5_000).unwrap();
+        let ids: Vec<String> = store
+            .messages_for(thread_id, 10)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.msg_id)
+            .collect();
+        assert_eq!(ids, vec!["dup_b".to_string()]);
+
+        // `ts = 0` (unknown time) is never used as a delete key for an identified message.
+        store
+            .upsert_message(&text_message("zero_a", thread_id, 0))
+            .unwrap();
+        store
+            .upsert_message(&text_message("zero_b", thread_id, 0))
+            .unwrap();
+        store.delete_message(thread_id, "zero_a", 0).unwrap();
+        let ids: Vec<String> = store
+            .messages_for(thread_id, 10)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.ts == 0)
+            .map(|m| m.msg_id)
+            .collect();
+        assert_eq!(ids, vec!["zero_b".to_string()]);
+    }
+
+    /// `open` must put a file-backed database into WAL mode (busy-timeout/reader fix).
+    #[test]
+    fn open_enables_wal_journal_mode() {
+        let dir = temp_db_dir("wal");
+        let db_path = dir.join("history.db");
+        let store = MessageStore::open(&db_path).unwrap();
+        let mode: String = store
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        let busy_timeout: i64 = store
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(busy_timeout, 5_000);
+        // A second connection on the same file must open without a lock error while the first
+        // one is still alive — the regression that motivated WAL.
+        let second = MessageStore::open(&db_path).unwrap();
+        second
+            .conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get::<_, i64>(0))
+            .unwrap();
+        drop(second);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
