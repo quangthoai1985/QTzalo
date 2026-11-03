@@ -2,7 +2,7 @@
 //!
 //! Notes: `re-notes/02_chat_data.md`.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::session::{obj, Session};
@@ -519,6 +519,35 @@ fn pick_str(v: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
+/// `Some((code, message))` when a reply envelope reports a non-zero `error_code`.
+///
+/// [O] Zalo answers **HTTP 200** even when an action failed: the verdict only exists in
+/// `error_code` (`re-notes/10` §3). A sender that never reads it reports a message the server
+/// dropped, which is the worst failure mode for a chat client — so every sender below shares
+/// this check. `None` also covers a reply without any `error_code` (nothing to reject).
+fn reply_error(v: &Value) -> Option<(i64, String)> {
+    let code = v.get("error_code").and_then(|c| c.as_i64())?;
+    if code == 0 {
+        return None;
+    }
+    let message = v
+        .get("error_message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    Some((code, message))
+}
+
+/// The `Err` a failed action returns: Vietnamese for the user, the server code for the log.
+fn failed(action: &str, (code, message): (i64, String)) -> anyhow::Error {
+    if message.is_empty() {
+        anyhow::anyhow!("{action} thất bại (mã {code})")
+    } else {
+        anyhow::anyhow!("{action} thất bại (mã {code}: {message})")
+    }
+}
+
 /// Send a 1-1 text message: `POST {domains.chat}/api/message/sms?{common}`
 pub async fn send_message(s: &Session, to_id: &str, text: &str) -> Result<Value> {
     if s.login.is_none() {
@@ -795,14 +824,12 @@ pub async fn send_attachment(
             s.maybe_decrypt(r, s.session_key_bytes()).await
         };
 
-        if let Some(code) = send_resp.get("error_code").and_then(Value::as_i64) {
-            if code != 0 {
-                let msg = send_resp
-                    .get("error_message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                anyhow::bail!("server error {code}: {msg}");
-            }
+        if let Some(err) = reply_error(&send_resp) {
+            crate::logger::log_error(
+                "chat::send_attachment",
+                &format!("ảnh: mã {}: {}", err.0, err.1),
+            );
+            return Err(failed("Gửi ảnh", err));
         }
 
         let final_thumb = if !thumb_url.is_empty() {
@@ -895,14 +922,14 @@ pub async fn send_attachment(
             "{file_host}{upload_ep}?{}&params={params}&type={target_type}",
             s.common_params()
         );
-        if let Ok(up_raw) = s
+        // A failed chunk used to `break` out of the loop and let the send continue without a
+        // file handle, so the caller reported a message the server never got. Fail the way the
+        // photo path does: no upload, no message.
+        let up_raw = s
             .post_multipart(&url, "chunkContent", &file_name, mime, chunk)
             .await
-        {
-            last_up_dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
-        } else {
-            break;
-        }
+            .with_context(|| format!("Tải phần {chunk_id}/{total_chunks} của tệp thất bại"))?;
+        last_up_dec = s.maybe_decrypt(up_raw, s.session_key_bytes()).await;
     }
 
     let data_node = last_up_dec.get("data").unwrap_or(&last_up_dec);
@@ -941,7 +968,14 @@ pub async fn send_attachment(
         let r = s.post_form(&url, format!("params={params}")).await?;
         s.maybe_decrypt(r, s.session_key_bytes()).await
     } else {
-        json!({ "error_code": -1 })
+        // No `fileId`: fall through to the single-shot `sharefile_full` path below. A made-up
+        // `{"error_code": -1}` envelope used to stand in here, which made the fallback look
+        // like a server verdict instead of a missing upload handle.
+        crate::logger::log_error(
+            "chat::send_attachment",
+            "asyncfile/upload không trả về fileId; thử sharefile_full",
+        );
+        Value::Null
     };
 
     if send_resp.get("error_code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
@@ -967,14 +1001,26 @@ pub async fn send_attachment(
         send_resp = s.maybe_decrypt(r, s.session_key_bytes()).await;
     }
 
-    if let Some(code) = send_resp.get("error_code").and_then(Value::as_i64) {
-        if code != 0 {
-            let msg = send_resp
-                .get("error_message")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            anyhow::bail!("server error {code}: {msg}");
+    match reply_error(&send_resp) {
+        Some(err) => {
+            crate::logger::log_error(
+                "chat::send_attachment",
+                &format!("tệp: mã {}: {}", err.0, err.1),
+            );
+            return Err(failed("Gửi tệp", err));
         }
+        // Neither `asyncfile/msg` nor `sharefile_full` gave a verdict: the file is not on the
+        // server, so do not hand the caller a message id we cannot point at. A reply that carries
+        // a `data` object is accepted even without `error_code` — some servers answer with the
+        // upload handle only.
+        None if send_resp.get("error_code").is_none() && send_resp.get("data").is_none() => {
+            crate::logger::log_error(
+                "chat::send_attachment",
+                "không có mã kết quả sau sharefile_full",
+            );
+            anyhow::bail!("Gửi tệp thất bại (máy chủ không trả về mã kết quả)");
+        }
+        None => {}
     }
 
     let final_url = if !file_url.is_empty() {
@@ -1480,12 +1526,11 @@ pub async fn send_link_message(
 
     match res {
         Ok(v) => Ok(v),
-        Err(_) => {
-            if is_group {
-                send_group_message(s, to_id, msg_str).await
-            } else {
-                send_message(s, to_id, msg_str).await
-            }
+        Err(e) => {
+            // Degrading the card to a plain-text message looked like success while the thing
+            // the user asked to send (the link card) was never sent (`re-notes/10` §3).
+            crate::logger::log_error("chat::send_link_message", &format!("{e:#}"));
+            Err(e.context("Không gửi được tin kèm liên kết"))
         }
     }
 }
@@ -2221,10 +2266,44 @@ pub async fn search_stickers_by_keyword(s: &Session, keyword: &str) -> Result<Ve
     Ok(out)
 }
 
+/// `(qmsgId, qmsgCliId, qmsgTs)` of the message a quote points at.
+///
+/// [O] Both ids are the quoted message's **server-side** identity (`re-notes/10` §3). Older
+/// builds invented them when parsing failed (`now - 1000`, and the timestamp reused as
+/// `qmsgCliId`), which produced a quote the server accepted but which pointed at nothing. A row
+/// without a server id (`out_` / `local_` / empty) is a message that has not been sent yet and
+/// must be refused, not guessed.
+///
+/// `Err` message is user-facing (Vietnamese): the GUI shows it as the send failure.
+fn quote_target_ids(quoted: &ChatMessage) -> Result<(u64, u64, u64)> {
+    if quoted.id.is_empty()
+        || quoted.id.starts_with("out_")
+        || quoted.id.starts_with("local_")
+    {
+        anyhow::bail!("Không trích dẫn được tin này (tin chưa có mã từ máy chủ)");
+    }
+    let qmsg_id = quoted
+        .id
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("Không trích dẫn được tin này (mã tin không hợp lệ)"))?;
+    // `qmsgCliId` is the client id of the quoted message; the send time is the fallback Zalo
+    // itself uses when the row predates `cliMsgId` capture. Never fabricated.
+    let qmsg_cli_id = quoted
+        .cli_msg_id
+        .as_deref()
+        .and_then(|c| c.parse::<u64>().ok())
+        .or_else(|| (quoted.ts > 0).then_some(quoted.ts as u64))
+        .ok_or_else(|| {
+            anyhow::anyhow!("Không trích dẫn được tin này (thiếu thời điểm gửi của tin gốc)")
+        })?;
+    let qmsg_ts = quoted.ts.max(0) as u64;
+    Ok((qmsg_id, qmsg_cli_id, qmsg_ts))
+}
+
 /// Send a quote/reply message (`sendQuoteMessage` / `sendGroupQuoteMessage` in `compact-app-pc.b7bec208c4c8f73e09f8.js:14317494`):
 /// - 1-1 (`cmd 11771`): `POST {domains.chat}/api/message/quote?{common}`
 /// - Group (`cmd 11197`): `POST {domains.group}/api/group/quote?{common}`
-/// Automatically falls back to `send_message` / `send_group_message` if the quoted message lacks a server ID.
+/// Refused (instead of degraded to plain text) when the quoted message has no server id.
 pub async fn send_quote_message(
     s: &Session,
     to_id: &str,
@@ -2256,19 +2335,9 @@ pub async fn send_quote_message(
         "0"
     };
 
-    let qmsg_id_num = quoted.id.parse::<u64>().unwrap_or(now.saturating_sub(1000));
-    let qmsg_ts = if quoted.ts > 0 {
-        quoted.ts as u64
-    } else {
-        now.saturating_sub(1000)
-    };
-    let qmsg_cli_id = qmsg_ts;
+    let (qmsg_id_num, qmsg_cli_id, qmsg_ts) = quote_target_ids(quoted)?;
 
     let quote_res: Result<Value> = async {
-        if quoted.id.starts_with("out_") || quoted.id.starts_with("local_") || quoted.id.is_empty()
-        {
-            anyhow::bail!("local quote id");
-        }
         if is_group {
             let clean_grid = to_id
                 .trim_start_matches("group_")
@@ -2339,12 +2408,11 @@ pub async fn send_quote_message(
 
     match quote_res {
         Ok(r) => Ok(r),
-        Err(_) => {
-            if is_group {
-                send_group_message(s, to_id, text).await
-            } else {
-                send_message(s, to_id, text).await
-            }
+        Err(e) => {
+            // Same rule as `send_link_message`: sending the text instead and reporting Ok hid a
+            // quote that never existed on the server (`re-notes/10` §3).
+            crate::logger::log_error("chat::send_quote_message", &format!("{e:#}"));
+            Err(e.context("Không gửi được tin trích dẫn"))
         }
     }
 }
@@ -2480,7 +2548,14 @@ pub async fn send_reaction(
 
     let params = s.encoded_params(&body)?;
     let resp = s.post_form(&url, format!("params={params}")).await?;
-    Ok(s.maybe_decrypt(resp, s.session_key_bytes()).await)
+    let resp = s.maybe_decrypt(resp, s.session_key_bytes()).await;
+    // The reaction endpoint answers HTTP 200 with `error_code != 0` on refusal; without this
+    // check a failed tap looked delivered (the GUI had already added it optimistically).
+    if let Some(err) = reply_error(&resp) {
+        crate::logger::log_error("chat::send_reaction", &format!("mã {}: {}", err.0, err.1));
+        return Err(failed("Thả cảm xúc", err));
+    }
+    Ok(resp)
 }
 
 /// Delete a message for me (`deleteOneOneMessageV2` / `deleteGroupMessageV2` @ `compact-app-pc.js:14373319`, cmd `11779` / `11834`).
@@ -3227,6 +3302,32 @@ pub async fn get_cloud_messages(
     Ok(dec)
 }
 
+/// Field [`get_chat_from_polling`] sets when the 12 s client window expired with **no** answer.
+///
+/// [O] The server ends its own long-poll with an empty body on keepalive timeout; a *client*
+/// timeout is a different thing — the request may still be in flight, no page was delivered
+/// and the cursor did not move. Treating it as `{"error_code":0,"data":{}}` made a slow network
+/// indistinguishable from "no new messages" (`re-notes/10` §7).
+const LP_TIMEOUT_KEY: &str = "__qtzalo_lp_timeout";
+
+/// `true` when a long-poll reply is the client-side timeout marker, not a server page.
+pub fn is_poll_timeout(lp_resp: &Value) -> bool {
+    lp_resp
+        .get(LP_TIMEOUT_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The value [`get_chat_from_polling`] returns when its window expired without an answer.
+///
+/// It keeps `error_code: 0` so existing callers do not treat it as an error, but the extra
+/// field makes it distinguishable — see [`is_poll_timeout`].
+fn poll_timeout_marker() -> Value {
+    let mut v = json!({ "error_code": 0, "data": {} });
+    v[LP_TIMEOUT_KEY] = json!(true);
+    v
+}
+
 /// Call Zalo's native HTTP long-polling message endpoint (`getChatFromPolling`, cmd `99100`).
 ///
 /// Uses a 12-second timeout matching `lp_chat` long-polling windows (`sync-v2-sub-worker.js:3498030`).
@@ -3287,8 +3388,10 @@ pub async fn get_chat_from_polling(s: &Session, state: &mut PollState) -> Result
             Err(e)
         }
         Err(_) => {
-            crate::trace_shape::line("lp", "<- timeout 12s (no new actions)");
-            Ok(json!({"error_code": 0, "data": {}}))
+            // The window expired and the cursor did not move: hand the caller a distinguishable
+            // value instead of an empty page.
+            crate::trace_shape::line("lp", "<- timeout 12s (cửa sổ kết thúc, con trỏ không đổi)");
+            Ok(poll_timeout_marker())
         }
     }
 }
@@ -3535,6 +3638,14 @@ mod catchup_tests {
     }
 }
 
+/// Groups refreshed through `/api/cm/getrecentv2` per catch-up round.
+///
+/// [O] Each group costs one request, so refreshing every group is an N+1 pattern: on the real
+/// account a refresh with many groups fired one `getrecentv2` per group, every round
+/// (`re-notes/09` §7). Four is enough to keep the conversations a user is looking at fresh;
+/// the rest keep their stored history and come up in the next round.
+pub const CLOUD_SYNC_GROUPS_PER_ROUND: usize = 4;
+
 /// Poll both `getChatFromPolling` (`lp_chat`) and `get-last-msgs` (`convers_api`),
 /// merge all incoming/outgoing/group messages into `threads`, resolve unknown names,
 /// and persist to `zalo_history.db` and `threads_cache.json`.
@@ -3553,9 +3664,21 @@ pub async fn poll_new_messages(
     let mut fetched = 0usize;
     for batch in 1..=LP_CATCHUP_MAX_BATCHES {
         let before = state.clone();
-        let Ok(lp_resp) = get_chat_from_polling(s, state).await else {
-            break;
+        let lp_resp = match get_chat_from_polling(s, state).await {
+            Ok(r) => r,
+            Err(e) => {
+                // A transport or server error is not "no new messages": end the round and keep
+                // the cursor, so the next poll asks for the same range again.
+                crate::logger::log_error("chat::poll_new_messages", &format!("{e:#}"));
+                break;
+            }
         };
+        if is_poll_timeout(&lp_resp) {
+            // The window ended without a page. Stop instead of pretending the server answered
+            // "nothing new"; the cursor did not move, so the next round resumes here.
+            crate::trace_shape::line("lp", "hết cửa sổ long-poll; giữ con trỏ, dừng đợt");
+            break;
+        }
         merge_previews(threads, &lp_resp);
         fetched += lp_reply_message_count(&lp_resp);
         if !lp_should_continue(&before, state, &lp_resp) {
@@ -3590,12 +3713,28 @@ pub async fn poll_new_messages(
             }
         }
     }
-    let group_ids: Vec<String> = threads
+    // Newest local activity first, then capped (see [`CLOUD_SYNC_GROUPS_PER_ROUND`]).
+    let mut group_ids: Vec<(i64, String)> = threads
         .iter()
         .filter(|t| t.is_group && !t.id.is_empty())
-        .map(|t| t.id.clone())
+        .map(|t| {
+            let newest = t.messages.iter().map(|m| m.ts).max().unwrap_or(0);
+            (newest, t.id.clone())
+        })
         .collect();
-    for gid in group_ids {
+    group_ids.sort_by_key(|(newest, _)| std::cmp::Reverse(*newest));
+    let total_groups = group_ids.len();
+    group_ids.truncate(CLOUD_SYNC_GROUPS_PER_ROUND);
+    if total_groups > group_ids.len() {
+        crate::trace_shape::line(
+            "cm",
+            format!(
+                "cloud: {total_groups} nhóm, chỉ nạp {} nhóm hoạt động mới nhất đợt này",
+                group_ids.len()
+            ),
+        );
+    }
+    for (_, gid) in group_ids {
         if let Ok(cm_resp) = get_cloud_messages(s, &gid, "0", false, 50).await {
             if let Some(t) = threads.iter_mut().find(|t| t.id == gid) {
                 merge_cloud_with_gap_fill(s, t, &gid, &cm_resp).await;
@@ -5763,5 +5902,92 @@ mod tests {
         assert_eq!(group_member_count("test_grp_cache_1"), Some(15));
         remember_group_member_count("test_grp_cache_1", 16);
         assert_eq!(group_member_count("test_grp_cache_1"), Some(16));
+    }
+
+    // -- Đợt 2: lỗi gửi/nhận không được "làm phẳng" thành thành công --------------
+
+    #[test]
+    fn reply_error_reports_only_a_non_zero_verdict() {
+        assert_eq!(reply_error(&json!({ "error_code": 0, "data": {} })), None);
+        // No `error_code` at all: the envelope carries no verdict, so there is nothing to reject.
+        assert_eq!(reply_error(&json!({ "data": {} })), None);
+        assert_eq!(
+            reply_error(&json!({ "error_code": 245, "error_message": "  Quá nhanh  " })),
+            Some((245, "Quá nhanh".to_string()))
+        );
+        // The message text is optional; the code is not.
+        assert_eq!(
+            reply_error(&json!({ "error_code": -102 })),
+            Some((-102, String::new()))
+        );
+        // String-encoded codes are not what Zalo sends here; do not invent a verdict.
+        assert_eq!(reply_error(&json!({ "error_code": "245" })), None);
+    }
+
+    #[test]
+    fn failed_action_message_is_vietnamese_and_keeps_the_code() {
+        assert_eq!(
+            failed("Thả cảm xúc", (245, "Quá nhanh".into())).to_string(),
+            "Thả cảm xúc thất bại (mã 245: Quá nhanh)"
+        );
+        assert_eq!(
+            failed("Gửi tệp", (5, String::new())).to_string(),
+            "Gửi tệp thất bại (mã 5)"
+        );
+    }
+
+    #[test]
+    fn quote_target_accepts_only_server_message_ids() {
+        let msg = |id: &str| ChatMessage {
+            id: id.into(),
+            cli_msg_id: Some("1793705979715".into()),
+            ts: 1793705979842,
+            ..Default::default()
+        };
+        assert_eq!(
+            quote_target_ids(&msg("8447783931887")).unwrap(),
+            (8447783931887u64, 1793705979715u64, 1793705979842u64)
+        );
+        // A message that has not reached the server has no id to quote: refuse, never invent.
+        for id in ["", "out_1793705979842", "local_3", "khong-phai-so"] {
+            let err = quote_target_ids(&msg(id)).unwrap_err().to_string();
+            assert!(err.starts_with("Không trích dẫn được tin này"), "{id}: {err}");
+        }
+    }
+
+    #[test]
+    fn quote_target_falls_back_to_send_time_and_refuses_without_one() {
+        let mut m = ChatMessage {
+            id: "8447783931887".into(),
+            ts: 1793705979842,
+            ..Default::default()
+        };
+        // No `cliMsgId` captured: Zalo's own fallback is the quoted message's send time.
+        assert_eq!(
+            quote_target_ids(&m).unwrap(),
+            (8447783931887u64, 1793705979842u64, 1793705979842u64)
+        );
+        // Neither id nor time: the quote would point at nothing.
+        m.ts = 0;
+        let err = quote_target_ids(&m).unwrap_err().to_string();
+        assert!(err.contains("thiếu thời điểm gửi"), "{err}");
+    }
+
+    #[test]
+    fn poll_timeout_is_not_an_empty_page() {
+        let timeout = poll_timeout_marker();
+        assert!(is_poll_timeout(&timeout));
+        assert_eq!(timeout["error_code"], json!(0), "không phải lỗi mạng");
+        assert_eq!(lp_reply_message_count(&timeout), 0);
+        assert!(!lp_reply_wants_more(&timeout));
+        // The cursor did not move, so the round must stop instead of re-polling the same range.
+        let before = PollState::default();
+        let after = before.clone();
+        assert!(!lp_should_continue(&before, &after, &timeout));
+
+        // An empty page the server actually produced is not the marker.
+        let empty_page = json!({ "error_code": 0, "data": {} });
+        assert!(!is_poll_timeout(&empty_page));
+        assert_ne!(empty_page.get(LP_TIMEOUT_KEY), timeout.get(LP_TIMEOUT_KEY));
     }
 }
