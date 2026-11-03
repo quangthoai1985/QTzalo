@@ -1,5 +1,12 @@
 # 13 — `db-cross-v4` (B3.3): bản đồ nhị phân từ PE header đến vùng mã
 
+> **⚠️ ĐÍNH CHÍNH (04/11/2026):** `re-notes/14_db_cross_v4_disasm.md` đã disassemble bằng `dumpbin`
+> (có sẵn trong VS Build Tools, không cần PATH) và **sửa hai kết luận của file này**: (1) 4 con trỏ ở
+> export `0x103334` **không phải** 4 hàm N-API mà là bảng khởi tạo CRT — 4 hàm thật là
+> `getVersion=0x119A`, `parseBinNet=0x1C35`, `decompressAndDecryptDb=0x6299`, `_V2=0x665E`;
+> (2) header có magic **`"ZDB4.0"`**, đọc **big-endian**, băm luồng 64 KiB/lần. Giữ file này làm
+> bản đồ section/import/chuỗi; đọc file 14 cho phần mã.
+
 > **Ngày:** 2026-11-03. **Phạm vi:** phân tích **tĩnh** `db-cross-v4-native.node`
 > (`%LOCALAPPDATA%\Programs\Zalo\Zalo-26.10.20\resources\app.asar.unpacked\native\nativelibs\db-cross-v4\prebuilt\window\electron_x86\`).
 > **Không chạy mã Zalo, không gọi mạng, không sửa file trong repo.** Công cụ: Python 3.12 thuần stdlib
