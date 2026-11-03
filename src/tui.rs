@@ -43,6 +43,13 @@ const POLL_SECS: u64 = 4;
 /// (a long poll every [`POLL_SECS`] would otherwise rewrite the file nearly every time).
 const SYNC_SAVE_SECS: u64 = 2;
 
+/// Upper bound for one `lp_control` long-poll. The GUI gives it a loop of its own, but the TUI
+/// runs it after the message poll (one account, one long-poll at a time), so an unbounded wait
+/// there would push the next message poll back by however long the server holds the request.
+/// A cut-short poll keeps its cursor and the server replays what was not delivered, so this only
+/// bounds latency — reactions are never lost.
+const CONTROL_POLL_TIMEOUT_MS: u64 = 4_000;
+
 /// Quick-reaction palette for keys `1`..`6`, same order as the GUI picker.
 const QUICK_REACTIONS: [&str; 6] = ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F606}", "\u{1F62E}", "\u{1F622}", "\u{1F620}"];
 
@@ -127,6 +134,13 @@ enum BgEvent {
         state: chat::PollState,
     },
     PollFailed(String),
+    /// Reactions carried by the `lp_control` reply polled right after the message poll.
+    Reactions(Vec<crate::reaction::ReactionEvent>),
+    /// New `lp_control` cursor. Always sent after a control poll was attempted (also when it
+    /// failed, to clear `ctrl_inflight`); on failure the cursor is the unchanged one.
+    Controls {
+        ctrl: crate::call::CtrlPollState,
+    },
     ThreadsRefreshed(Vec<Thread>),
     HistoryLoaded {
         thread_id: String,
@@ -171,13 +185,35 @@ fn sync_state_for_save(
     uin: &str,
     poll: &chat::PollState,
     ws_queues: &std::collections::BTreeMap<String, chat::QueueCursor>,
+    ctrl: &crate::call::CtrlPollState,
 ) -> Option<crate::sync_state::SyncState> {
     // `sanitize_uin` also trims, so the stored `uin` matches the one a later `load` compares.
     let uin = crate::sync_state::sanitize_uin(uin)?;
     let mut st = crate::sync_state::SyncState::new(uin);
     st.poll = poll.clone();
     st.ws_queues = ws_queues.clone();
+    st.ctrl = ctrl.clone();
     Some(st)
+}
+
+/// Reaction events carried by one `lp_control` reply's `data` node, extracted exactly like the
+/// GUI worker does (`send_reactions`): the account UIN resolves the `"0"` self sentinel and the
+/// Cloud id resolves `reactGroups` of "Cloud của tôi". Empty when not signed in.
+fn reactions_from_control_poll(
+    session: &Session,
+    data: &Value,
+) -> Vec<crate::reaction::ReactionEvent> {
+    let Some(li) = session.login.as_ref() else {
+        return Vec::new();
+    };
+    let cloud = Some(li.send2me_id.as_str()).filter(|c| !c.is_empty());
+    crate::reaction::extract_events(data, &li.uin, cloud)
+}
+
+/// Merge reaction events into the loaded threads. A thin seam over
+/// [`crate::reaction::apply_to_threads`] so the merge can be tested without a terminal.
+fn merge_reactions(threads: &mut [Thread], events: &[crate::reaction::ReactionEvent]) -> bool {
+    crate::reaction::apply_to_threads(threads, events)
 }
 
 pub struct TuiApp<'a> {
@@ -216,6 +252,9 @@ pub struct TuiApp<'a> {
     prompt: Option<PromptState>,
     confirm: Option<ConfirmAction>,
     poll_inflight: bool,
+    /// A chained `lp_control` poll is still running; a new one may not start until the previous
+    /// reply arrived, which keeps the TUI to one long-poll per account at a time.
+    ctrl_inflight: bool,
     bg_rx: Receiver<BgEvent>,
     bg_tx: Sender<BgEvent>,
 }
@@ -264,6 +303,7 @@ impl<'a> TuiApp<'a> {
             prompt: None,
             confirm: None,
             poll_inflight: false,
+            ctrl_inflight: false,
             bg_rx: rx,
             bg_tx: tx,
         };
@@ -553,12 +593,18 @@ impl<'a> TuiApp<'a> {
             .as_ref()
             .map(|l| l.uin.clone())
             .unwrap_or_default();
-        let Some(mut st) = sync_state_for_save(&uin, &self.sync.poll, &self.sync.ws_queues) else {
+        let Some(mut st) =
+            sync_state_for_save(&uin, &self.sync.poll, &self.sync.ws_queues, &self.sync.ctrl)
+        else {
             return;
         };
         // `updated_at_ms` changes on every write, so compare the cursors themselves.
         if let Some(saved) = &self.sync_saved {
-            if saved.uin == st.uin && saved.poll == st.poll && saved.ws_queues == st.ws_queues {
+            if saved.uin == st.uin
+                && saved.poll == st.poll
+                && saved.ws_queues == st.ws_queues
+                && saved.ctrl == st.ctrl
+            {
                 return;
             }
         }
@@ -574,8 +620,14 @@ impl<'a> TuiApp<'a> {
             return;
         }
         self.poll_inflight = true;
+        // Reactions ride on the `lp_control` long-poll. It runs in this same background task,
+        // *after* the message poll: two long-polls on one account would compete for the same
+        // server cursors. If the previous control poll has not answered yet, skip this round.
+        let with_controls = !self.ctrl_inflight;
+        self.ctrl_inflight |= with_controls;
         let session = self.session_clone();
         let mut state = self.sync.poll.clone();
+        let mut ctrl = self.sync.ctrl.clone();
         let mut threads = self.threads.clone();
         let tx = self.bg_tx.clone();
         tokio::spawn(async move {
@@ -588,6 +640,32 @@ impl<'a> TuiApp<'a> {
                     let _ = tx.send(BgEvent::PollFailed(e.to_string()));
                 }
             }
+            if !with_controls {
+                return;
+            }
+            // 2) `lp_control`: reactions since the saved cursor. A network error only skips this
+            // round — the cursor is untouched and the server replays the queue next time.
+            let polled = tokio::time::timeout(
+                Duration::from_millis(CONTROL_POLL_TIMEOUT_MS),
+                crate::call::poll_controls(&session, &mut ctrl),
+            )
+            .await;
+            let reactions = match polled {
+                Ok(Ok(poll)) => reactions_from_control_poll(&session, &poll.data),
+                Ok(Err(e)) => {
+                    logger::log_error("tui::poll_controls", &e.to_string());
+                    Vec::new()
+                }
+                Err(_) => {
+                    // No reply in time is normal for a long-poll; keep the cursor and retry.
+                    crate::trace_shape::line("tui", "lp_control: chua co tra loi");
+                    Vec::new()
+                }
+            };
+            if !reactions.is_empty() {
+                let _ = tx.send(BgEvent::Reactions(reactions));
+            }
+            let _ = tx.send(BgEvent::Controls { ctrl });
         });
     }
 
@@ -1027,10 +1105,13 @@ impl<'a> TuiApp<'a> {
                     let _ = std::fs::remove_file(path);
                 }
                 self.session.logout();
-                // Default cursor, and nothing of the old account may be written on exit.
+                // Default cursors, and nothing of the old account may be written on exit.
                 self.sync = crate::sync_state::SyncState::new("");
                 self.sync_saved = None;
                 self.sync_due = None;
+                // A control poll of the old session may still be in flight; its reply is ignored
+                // above because `login` is gone.
+                self.ctrl_inflight = false;
                 self.threads.clear();
                 self.filtered.clear();
                 self.list_state.select(None);
@@ -1403,6 +1484,22 @@ impl<'a> TuiApp<'a> {
         changed
     }
 
+    /// Merge inbound reaction events into the loaded threads and persist the ones they touched,
+    /// the same rule the GUI uses for `GuiEvent::ReactionsReceived`. The render loop redraws
+    /// every tick, so a changed chip shows up on the next frame without extra invalidation.
+    /// Returns `true` when a chip changed.
+    fn apply_reactions(&mut self, events: &[crate::reaction::ReactionEvent]) -> bool {
+        if events.is_empty() {
+            return false;
+        }
+        let changed = merge_reactions(&mut self.threads, events);
+        if changed {
+            chat::save_threads_cache(&self.threads);
+            self.persist_async();
+        }
+        changed
+    }
+
     fn apply_refresh(&mut self, list: Vec<Thread>) {
         if list.is_empty() {
             self.status = "Khong lay duoc danh sach hoi thoai".into();
@@ -1435,6 +1532,20 @@ impl<'a> TuiApp<'a> {
                 BgEvent::PollFailed(err) => {
                     self.poll_inflight = false;
                     self.status = format!("Loi cap nhat: {err}");
+                }
+                BgEvent::Reactions(events) => {
+                    if self.apply_reactions(&events) {
+                        self.status = format!("Cap nhat cam xuc {}", crate::ui::clock());
+                    }
+                }
+                BgEvent::Controls { ctrl } => {
+                    self.ctrl_inflight = false;
+                    // After a logout the reply belongs to the account that just left: keep the
+                    // default cursor instead of bringing the old one back.
+                    if self.session.login.is_some() && self.sync.ctrl != ctrl {
+                        self.sync.ctrl = ctrl;
+                        self.sync_due = Some(Instant::now() + Duration::from_secs(SYNC_SAVE_SECS));
+                    }
                 }
                 BgEvent::ThreadsRefreshed(list) => {
                     let n = list.len();
@@ -1581,7 +1692,9 @@ async fn run_loop(
             }
         }
 
-        if Instant::now() >= next_poll {
+        // A chained `lp_control` poll may still be running from the previous cycle; the next
+        // message poll waits for it, so one account never has two long-polls open at once.
+        if !app.ctrl_inflight && Instant::now() >= next_poll {
             next_poll = Instant::now() + Duration::from_secs(POLL_SECS);
             app.spawn_poll();
         }
@@ -2730,6 +2843,7 @@ mod tests {
             prompt: None,
             confirm: None,
             poll_inflight: false,
+            ctrl_inflight: false,
             bg_rx: rx,
             bg_tx: tx,
         };
@@ -2749,13 +2863,14 @@ mod tests {
     fn sync_cursor_is_only_saved_for_digit_uins() {
         let poll = chat::PollState::default();
         let ws = std::collections::BTreeMap::new();
+        let ctrl = crate::call::CtrlPollState::default();
         for bad in ["", "  ", "../1", "12a", "１２３"] {
-            assert!(sync_state_for_save(bad, &poll, &ws).is_none(), "{bad:?}");
+            assert!(sync_state_for_save(bad, &poll, &ws, &ctrl).is_none(), "{bad:?}");
         }
     }
 
     #[test]
-    fn sync_save_keeps_poll_and_socket_cursors() {
+    fn sync_save_keeps_poll_socket_and_control_cursors() {
         let mut poll = chat::PollState::default();
         poll.last_action_id = "14489176548854".into();
         poll.queues.insert(
@@ -2767,11 +2882,53 @@ mod tests {
             "510_1".into(),
             chat::QueueCursor { last_id: "8440948595701".into(), ids: Vec::new() },
         );
+        let mut ctrl = crate::call::CtrlPollState::default();
+        ctrl.last_action_id = "6120000000001".into();
+        ctrl.queues.insert(
+            "603_1".into(),
+            chat::QueueCursor { last_id: "6120000000000".into(), ids: Vec::new() },
+        );
 
-        let st = sync_state_for_save(" 12345 ", &poll, &ws).expect("digit uin");
+        let st = sync_state_for_save(" 12345 ", &poll, &ws, &ctrl).expect("digit uin");
 
         assert_eq!(st.uin, "12345", "stored uin must match what `load` compares");
         assert_eq!(st.poll, poll);
         assert_eq!(st.ws_queues, ws);
+        assert_eq!(st.ctrl, ctrl, "`lp_control` cursor must survive a save");
+    }
+
+    #[test]
+    fn merge_reactions_updates_the_loaded_thread() {
+        let mut threads = vec![Thread {
+            id: "u1".into(),
+            name: "An".into(),
+            preview: String::new(),
+            time: String::new(),
+            avatar: None,
+            is_group: false,
+            messages: vec![ChatMessage {
+                id: "m1".into(),
+                sender: "An".into(),
+                text: "xin chao".into(),
+                time: "12:00".into(),
+                ts: 1_700_000_000_000,
+                ..Default::default()
+            }],
+        }];
+        let events = vec![crate::reaction::ReactionEvent {
+            thread_id: "u1".into(),
+            is_group: false,
+            msg_id: "m1".into(),
+            uid: "9".into(),
+            emoji: "👍".into(),
+            ts: 1_700_000_060_000,
+            cli_msg_id: String::new(),
+        }];
+
+        assert!(merge_reactions(&mut threads, &events), "new chip changes the thread");
+        assert_eq!(threads[0].messages[0].reactions.len(), 1);
+        // The same event twice is a no-op, so a replayed queue cannot duplicate chips.
+        assert!(!merge_reactions(&mut threads, &events));
+        assert_eq!(threads[0].messages[0].reactions.len(), 1);
     }
 }
