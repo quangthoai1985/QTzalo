@@ -2615,6 +2615,24 @@ fn server_message_id<'a>(msg: &'a ChatMessage, action: &str) -> Result<&'a str> 
     Ok(id)
 }
 
+/// `cliMsgId` of a message that may be referenced by a write request (delete / recall).
+///
+/// Those payloads carry the row's own `cliMsgId` / `cliMsgIdUndo`. The server issues that id, so
+/// it is preferred over `ts`; `ts` (ms) is only the fallback used when the row predates
+/// `cliMsgId` capture. Both missing means Unknown — refuse instead of inventing one, the same
+/// rule `quote_target_ids` follows. Earlier builds sent `now` as the id, i.e. an id the server
+/// never issued. `action` keeps the caller's Vietnamese wording.
+fn message_client_id(msg: &ChatMessage, action: &str) -> Result<u64> {
+    msg.cli_msg_id
+        .as_deref()
+        .map(str::trim)
+        .and_then(|s| s.parse::<u64>().ok())
+        // `0` is what older rows stored for "no cliMsgId" (the parser filters it out too).
+        .filter(|id| *id > 0)
+        .or_else(|| (msg.ts > 0).then_some(msg.ts as u64))
+        .ok_or_else(|| anyhow::anyhow!("{action} (thiếu mã và thời điểm gửi)"))
+}
+
 /// Delete a message for me (`deleteOneOneMessageV2` / `deleteGroupMessageV2` @ `compact-app-pc.js:14373319`, cmd `11779` / `11834`).
 pub async fn delete_message_for_me(
     s: &Session,
@@ -2627,6 +2645,8 @@ pub async fn delete_message_for_me(
     }
     // Refuse before any request: a client-only id cannot be deleted on the server.
     let msg_id = server_message_id(msg, "Không xoá được tin này")?;
+    // The row's own `cliMsgId` when known (server-issued), else its send time — never "now".
+    let cli_id = message_client_id(msg, "Không xoá được tin này")?.to_string();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -2642,11 +2662,6 @@ pub async fn delete_message_for_me(
         to_id
     } else {
         &msg.sender
-    };
-    let cli_id = if msg.ts > 0 {
-        msg.ts.to_string()
-    } else {
-        now.to_string()
     };
 
     let msgs_arr = json!([{
@@ -2710,15 +2725,12 @@ pub async fn recall_message(
     }
     // Refuse before any request: a client-only id cannot be recalled on the server.
     let msg_id = server_message_id(msg, "Không thu hồi được tin này")?;
+    // The row's own `cliMsgId` when known (server-issued), else its send time — never "now".
+    let cli_id = message_client_id(msg, "Không thu hồi được tin này")?.to_string();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let cli_id = if msg.ts > 0 {
-        msg.ts.to_string()
-    } else {
-        now.to_string()
-    };
 
     let reply = if is_group {
         let clean_grid = to_id
@@ -6312,6 +6324,71 @@ mod tests {
                 .to_string();
             assert_eq!(err, "Không thu hồi được tin này (tin chưa có mã từ máy chủ)");
         }
+    }
+
+    #[test]
+    fn delete_and_recall_prefer_the_rows_own_client_id() {
+        let msg = |id: &str, cli: Option<&str>, ts: i64| ChatMessage {
+            id: id.into(),
+            cli_msg_id: cli.map(str::to_string),
+            ts,
+            ..Default::default()
+        };
+        const DELETE: &str = "Không xoá được tin này";
+        const RECALL: &str = "Không thu hồi được tin này";
+
+        // (a) `cliMsgId` known and `ts` unknown: the server-issued id wins, the row is usable.
+        assert_eq!(
+            message_client_id(&msg("8447783931887", Some("1793705979715"), 0), DELETE).unwrap(),
+            1_793_705_979_715
+        );
+        // (b) `cliMsgId` empty / not numeric: fall back to the send time.
+        for cli in [Some(""), Some("   "), Some("khong-phai-so"), None] {
+            assert_eq!(
+                message_client_id(&msg("8447783931887", cli, 1_793_705_979_842), RECALL).unwrap(),
+                1_793_705_979_842,
+                "cli={cli:?}"
+            );
+        }
+        // (a') a real `cliMsgId` beats the timestamp when both are present.
+        assert_eq!(
+            message_client_id(
+                &msg("8447783931887", Some(" 1793705979715 "), 1_793_705_979_842),
+                DELETE
+            )
+            .unwrap(),
+            1_793_705_979_715
+        );
+        // (c) neither id nor send time: refuse, with the caller's own wording.
+        // `"0"` counts as "no cliMsgId" here (older rows stored it), so it behaves like `None`.
+        let unknown: [(Option<&str>, i64); 5] = [
+            (None, 0),
+            (None, -1),
+            (Some(""), 0),
+            (Some("0"), 0),
+            (Some("x"), -5),
+        ];
+        for (cli, ts) in unknown {
+            for action in [DELETE, RECALL] {
+                let err = message_client_id(&msg("8447783931887", cli, ts), action)
+                    .unwrap_err()
+                    .to_string();
+                assert_eq!(err, format!("{action} (thiếu mã và thời điểm gửi)"));
+            }
+        }
+        // …but `"0"` with a real send time still works, via the timestamp fallback.
+        assert_eq!(
+            message_client_id(&msg("8447783931887", Some("0"), 1_793_705_979_842), DELETE)
+                .unwrap(),
+            1_793_705_979_842
+        );
+        // (d) the id check still runs first: a client-only row keeps its own error.
+        assert_eq!(
+            server_message_id(&msg("out_1", Some("1793705979715"), 0), DELETE)
+                .unwrap_err()
+                .to_string(),
+            "Không xoá được tin này (tin chưa có mã từ máy chủ)"
+        );
     }
 
     #[test]
