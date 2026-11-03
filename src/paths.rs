@@ -172,6 +172,102 @@ fn cleanup_clipboard_images_in(
     removed
 }
 
+/// Upper bound for the on-disk image/video cache ([`cache_dir`]).
+///
+/// Zalo PC never trims its media cache: on this machine `%APPDATA%\ZaloData` reached 22 GB after
+/// ~3 months, 91 % of it cached media (`re-notes/12_zalo-electron-va-dung-luong.md`). QTzalo keeps
+/// the same speed benefit from caching but bounds it at startup.
+pub const CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Anything in the cache older than this is swept at startup.
+pub const CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Trim [`cache_dir`] to [`CACHE_MAX_BYTES`]: first delete regular files older than
+/// [`CACHE_MAX_AGE`], then delete least-recently-modified files until the rest fits.
+///
+/// Returns `(bytes_freed, files_removed)`. Symlinks and directories are never followed or removed;
+/// the session, history DB and settings live one level up and are never touched.
+pub fn trim_cache_dir() -> (u64, usize) {
+    trim_cache_in(
+        &cache_dir(),
+        CACHE_MAX_AGE,
+        CACHE_MAX_BYTES,
+        std::time::SystemTime::now(),
+    )
+}
+
+/// Testable core of [`trim_cache_dir`].
+fn trim_cache_in(
+    dir: &Path,
+    max_age: std::time::Duration,
+    max_bytes: u64,
+    now: std::time::SystemTime,
+) -> (u64, usize) {
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    collect_cache_files(dir, &mut files, 0);
+
+    let mut freed = 0u64;
+    let mut removed = 0usize;
+    let mut kept: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    for (path, size, mtime) in files {
+        let too_old = now
+            .duration_since(mtime)
+            .map(|age| age > max_age)
+            .unwrap_or(false);
+        if too_old && std::fs::remove_file(&path).is_ok() {
+            freed += size;
+            removed += 1;
+        } else {
+            kept.push((path, size, mtime));
+        }
+    }
+
+    let mut total: u64 = kept.iter().map(|(_, size, _)| *size).sum();
+    if total > max_bytes {
+        kept.sort_by_key(|(_, _, mtime)| *mtime);
+        for (path, size, _) in kept {
+            if total <= max_bytes {
+                break;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                total -= size;
+                freed += size;
+                removed += 1;
+            }
+        }
+    }
+    (freed, removed)
+}
+
+/// Collect regular files below `dir` (bounded depth, no symlink following).
+fn collect_cache_files(
+    dir: &Path,
+    out: &mut Vec<(PathBuf, u64, std::time::SystemTime)>,
+    depth: usize,
+) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        // `DirEntry::metadata` does not follow symlinks, so links are neither files nor dirs here.
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_file() {
+            out.push((
+                entry.path(),
+                meta.len(),
+                meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+            ));
+        } else if meta.is_dir() {
+            collect_cache_files(&entry.path(), out, depth + 1);
+        }
+    }
+}
+
 /// Diagnostic logs (`logs/`). Created on demand. Only written in dev mode.
 pub fn logs_dir() -> PathBuf {
     let dir = data_dir().join("logs");
@@ -368,6 +464,46 @@ mod tests {
         write_private(&f, b"x").unwrap();
         let mode = std::fs::metadata(&f).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_trim_removes_old_then_largest_oldest() {
+        use std::time::{Duration, SystemTime};
+        let dir = temp_dir("trim");
+        std::fs::create_dir_all(dir.join("videos")).unwrap();
+        let day = Duration::from_secs(24 * 3600);
+        std::fs::write(dir.join("old.png"), b"0123456789").unwrap();
+        std::fs::write(dir.join("videos").join("old.mp4"), b"0123456789").unwrap();
+        std::fs::write(dir.join("fresh.png"), b"0123456789").unwrap();
+
+        // Fresh files only: age pass keeps everything, size cap of 1 GiB is not reached.
+        let (freed, removed) = trim_cache_in(&dir, day, 1024 * 1024 * 1024, SystemTime::now());
+        assert_eq!((freed, removed), (0, 0));
+        assert!(dir.join("fresh.png").exists());
+
+        // 100 days later: all three files are older than 30 days and go.
+        let later = SystemTime::now() + 100 * day;
+        let (freed, removed) = trim_cache_in(&dir, day, 1024 * 1024 * 1024, later);
+        assert_eq!((freed, removed), (30, 3));
+        assert!(!dir.join("old.png").exists());
+        assert!(!dir.join("videos").join("old.mp4").exists());
+
+        // Size cap path: three fresh 10-byte files, cap of 15 bytes -> two are removed.
+        for name in ["a.png", "b.png", "c.png"] {
+            std::fs::write(dir.join(name), b"0123456789").unwrap();
+        }
+        let (freed, removed) = trim_cache_in(&dir, day, 15, SystemTime::now());
+        assert_eq!(removed, 2);
+        assert_eq!(freed, 20);
+        let left: u64 = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.metadata().ok())
+            .filter(|m| m.is_file())
+            .map(|m| m.len())
+            .sum();
+        assert!(left <= 15, "cache must fit the cap, left {left}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
