@@ -33,8 +33,23 @@ Ngày 2026-11-02. Phần B của `docs/dev/KE_HOACH_TIEP_THEO.md` §2, bước B
 - **[I]** "Mật khẩu" của module native chính là `privateKey` thu được sau khi giải `encrypted_key` bằng RSA. Với format 1 thì truyền ở dạng hex viết hoa. Khớp tóm tắt trong `KE_HOACH_TIEP_THEO.md` §B1.
 - Sau đó là các tác vụ `RESTORE_CONVERSATIONS` / `RESTORE_MESSAGES` có checkpoint. Thư mục tạm có dạng `blob_<id>`.
 
+## B3.2 — kênh của các sự kiện transfer [O]
+
+- Màn đồng bộ (`main-startup`) có `handleCtrlEvents(events)`, nhận danh sách **control event** (cùng dạng `controls[].content` mà QTzalo đọc từ `603_x` và `lp_control`, xem `re-notes/10` §5). Các sự kiện được kiểm lần lượt bằng một bảng hàm kiểm (`compact-app-pc.*.js`). Mọi hàm đều đọc `{act, data}` và so `data.pc_name` với tên máy, `data.public_key` với khoá công khai của phiên:
+
+| `act` | Điều kiện | Ý nghĩa |
+|---|---|---|
+| `user_confirm` | `user_action ∈ {1, 3}` | Người dùng đồng ý trên điện thoại |
+| `user_confirm` | `user_action = 0` | Từ chối |
+| `user_confirm` | `user_action = 2` | Điện thoại đang khôi phục (bận) |
+| `transfer_error` | `status = 1` / `status = 2` | Điện thoại hoạt động / nhàn rỗi |
+| `transfer_error` | `error_code ≠ 0` | Sao lưu lỗi |
+| `syncmsg_info` | chỉ so `public_key` | **Sao lưu xong** (`BACKUP_SUCCESS`): `data` mang các trường ở mục trên |
+| `transfer_after_login` | `data.temp_key` khác rỗng và `data.imei` = client id | Khoá sau đăng nhập QR (đã thấy thật) |
+
+- **[I]** `syncmsg_info` đến cùng đường với `transfer_after_login`, tức `603_1` hoặc `lp_control` (`controls[]`). Muốn QTzalo nhận được thì cần thêm một bộ lọc theo `act` cạnh `call::extract_voip_controls`. Giá trị `act_type` của các sự kiện này **[U]**.
+
 ## Việc tiếp theo
 
-- B3.2: tìm `zb.a.isBackupSuccess/isBackupFail`, xác định cmd/`act_type` của sự kiện transfer.
 - B3.3: phân tích `db-cross-v4-native.node` (exports, thư viện nén/mã hoá), có tính đến kiến trúc ia32.
 - B3.5: phía APK Android (khi người dùng đồng ý).
