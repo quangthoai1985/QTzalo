@@ -7,6 +7,21 @@
 //! `lp_control` long-poll all carry `data.reacts[]` (1-1) and `data.reactGroups[]` (groups):
 //! `{ uidFrom ("0" = this account), idTo, ts, msgType: "chat.reaction",
 //!    content: "<json>" → { rIcon, rType, source, rMsg: [{ gMsgID, cMsgID, msgType }] } }`.
+//!
+//! Only the newest messages of each conversation are kept in memory (`store::hydrate_threads`
+//! loads at most 200 per conversation), so a reaction can arrive for a message that is not
+//! loaded. Those events are no longer dropped on the floor: they go into a bounded FIFO
+//! ([`apply_deferred`]) and are counted with rate-limited logging, then applied as soon as the
+//! message shows up ("Tải thêm tin nhắn cũ").
+//!
+//! [`add_mine`] / [`remove_mine`] are optimistic: the bubble changes before the network round
+//! trip. [`rollback_mine`], [`snapshot_mine`] and [`restore_mine`] are the pure API the GUI/worker
+//! can call when the send fails; the `GuiEvent` wiring is still pending, see
+//! `docs/dev/BAN_GIAO.md` §8 ("Gửi lỗi thì không hoàn tác trên máy").
+
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -84,18 +99,47 @@ pub struct ReactionSummary {
 }
 
 /// String or number field as a string (`gMsgID`, `uidFrom`, `idTo` come as either).
+///
+/// An integral JSON float (`7001.0`, which a writer may emit for a 64-bit id) is normalised to
+/// `"7001"`; otherwise a numeric `gMsgID` of `0.0` would become `"0.0"` and stop matching the
+/// "gMsgID 0 → use cMsgID" rule below.
 fn str_or_num(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Number(n)) => {
+            if let Some(i) = n.as_i64() {
+                i.to_string()
+            } else if let Some(u) = n.as_u64() {
+                u.to_string()
+            } else if let Some(f) = n.as_f64().filter(|f| f.fract() == 0.0) {
+                if f >= -(2f64.powi(63)) && f < 2f64.powi(63) {
+                    (f as i64).to_string()
+                } else {
+                    n.to_string()
+                }
+            } else {
+                n.to_string()
+            }
+        }
         _ => String::new(),
     }
 }
 
+/// Integer field (`ts`) that the server normally sends as a number but sometimes as a string.
+/// A float (whole or fractional) is truncated, so one odd serialiser cannot make the event fall
+/// through the `ts == 0` filter.
 fn int_or_str(v: Option<&Value>) -> i64 {
     match v {
-        Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
-        Some(Value::String(s)) => s.trim().parse().unwrap_or(0),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .or_else(|| n.as_f64().map(|f| f as i64))
+            .unwrap_or(0),
+        Some(Value::String(s)) => s
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .or_else(|| s.trim().parse::<f64>().ok().map(|f| f as i64))
+            .unwrap_or(0),
         _ => 0,
     }
 }
@@ -227,25 +271,138 @@ pub fn apply(reactions: &mut Vec<MsgReaction>, ev: &ReactionEvent) -> bool {
     true
 }
 
+/// How many reaction events for messages outside the in-memory window are kept for a later
+/// retry. Bounded, so a long session with plenty of traffic for old conversations cannot grow
+/// memory without limit.
+const MAX_DEFERRED: usize = 200;
+
+/// Log the first missed event, then one line per this many: a burst of events for unloaded
+/// conversations must not flood the dev log (`crate::logger`).
+const MISSED_LOG_EVERY: u64 = 50;
+
+static MISSED_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// Events that could not be applied because their conversation or message is not in memory
+    /// (only the newest messages of each conversation are loaded). Replayed by
+    /// [`apply_deferred`] once the target shows up.
+    ///
+    /// Thread-local on purpose: `GuiEvent::ReactionsReceived` is handled on the GUI thread, so one
+    /// queue per thread is enough in production and unit tests stay independent of each other.
+    static DEFERRED: RefCell<VecDeque<ReactionEvent>> = const { RefCell::new(VecDeque::new()) };
+}
+
+/// Snapshot of the deferred queue, for tests (`apply_deferred` keeps it private otherwise).
+#[cfg(test)]
+fn deferred_events() -> Vec<ReactionEvent> {
+    DEFERRED.with(|q| q.borrow().iter().cloned().collect())
+}
+
+/// Empty the deferred queue so tests do not inherit another test's leftovers when libtest runs
+/// them one at a time on the same thread (`--test-threads=1`).
+#[cfg(test)]
+fn clear_deferred() {
+    DEFERRED.with(|q| q.borrow_mut().clear());
+}
+
+/// Rate-limit rule for [`note_missed`]: log the first miss, then every [`MISSED_LOG_EVERY`]th.
+fn missed_log_due(count: u64) -> bool {
+    count == 1 || count % MISSED_LOG_EVERY == 0
+}
+
+/// Remember one event that had no loaded target, so a later [`apply_deferred`] can apply it.
+/// Returns `true` when it was not already queued (the socket, `lp_control` and the replay after a
+/// restart can all carry the same change).
+fn defer(ev: &ReactionEvent) -> bool {
+    DEFERRED.with(|q| {
+        let mut q = q.borrow_mut();
+        if q.iter().any(|e| e == ev) {
+            return false;
+        }
+        q.push_back(ev.clone());
+        while q.len() > MAX_DEFERRED {
+            q.pop_front();
+        }
+        true
+    })
+}
+
+/// Count a newly deferred event and log it with rate limiting (dev mode only, via
+/// `crate::logger`).
+fn note_missed(ev: &ReactionEvent) {
+    let count = MISSED_EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
+    if !missed_log_due(count) {
+        return;
+    }
+    let target = if ev.msg_id.is_empty() {
+        &ev.cli_msg_id
+    } else {
+        &ev.msg_id
+    };
+    crate::logger::log_error(
+        "reaction::apply_to_threads",
+        &format!(
+            "deferred {count} event(s) with no loaded target: thread {}, msg {target}, uid {} (empty emoji = removal)",
+            ev.thread_id, ev.uid
+        ),
+    );
+}
+
+/// Apply one event to its loaded message. `None` when the conversation or the message is not in
+/// memory (the caller then defers it); `Some(changed)` when it was applied.
+fn apply_event(threads: &mut [crate::chat::Thread], ev: &ReactionEvent) -> Option<bool> {
+    let t = threads.iter_mut().find(|t| t.id == ev.thread_id)?;
+    // By `gMsgID` when the event has one, else by `cliMsgId` (own messages).
+    let target = |m: &&mut crate::chat::ChatMessage| {
+        if ev.msg_id.is_empty() {
+            !ev.cli_msg_id.is_empty() && m.cli_msg_id.as_deref() == Some(ev.cli_msg_id.as_str())
+        } else {
+            m.id == ev.msg_id
+        }
+    };
+    let m = t.messages.iter_mut().find(target)?;
+    Some(apply(&mut m.reactions, ev))
+}
+
+/// Apply the events deferred by earlier batches (their target was outside the in-memory window)
+/// and keep the ones that still have no target. Returns `true` if any message changed.
+///
+/// [`apply_to_threads`] already retries this before every new batch, so calling it directly is
+/// only needed to catch up immediately after loading more history
+/// (`WorkerCmd::LoadGroupHistory`, "Tải thêm tin nhắn cũ").
+pub fn apply_deferred(threads: &mut [crate::chat::Thread]) -> bool {
+    let pending = DEFERRED.with(|q| std::mem::take(&mut *q.borrow_mut()));
+    if pending.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    let mut still = VecDeque::with_capacity(pending.len());
+    for ev in pending {
+        match apply_event(threads, &ev) {
+            Some(c) => changed |= c,
+            None => still.push_back(ev),
+        }
+    }
+    DEFERRED.with(|q| *q.borrow_mut() = still);
+    changed
+}
+
 /// Apply events to the messages held in memory (the newest messages of each conversation).
-/// Events for a conversation or message that is not loaded are dropped. Returns `true` if any
+///
+/// An event for a conversation or message that is not loaded is queued (bounded FIFO,
+/// [`apply_deferred`]) and logged with rate limiting instead of being dropped silently, so a
+/// reaction on an older message is applied once that message is loaded. Returns `true` if any
 /// message changed.
 pub fn apply_to_threads(threads: &mut [crate::chat::Thread], events: &[ReactionEvent]) -> bool {
-    let mut changed = false;
+    let mut changed = apply_deferred(threads);
     for ev in events {
-        let Some(t) = threads.iter_mut().find(|t| t.id == ev.thread_id) else {
-            continue;
-        };
-        // By `gMsgID` when the event has one, else by `cliMsgId` (own messages).
-        let target = |m: &&mut crate::chat::ChatMessage| {
-            if ev.msg_id.is_empty() {
-                !ev.cli_msg_id.is_empty() && m.cli_msg_id.as_deref() == Some(ev.cli_msg_id.as_str())
-            } else {
-                m.id == ev.msg_id
+        match apply_event(threads, ev) {
+            Some(c) => changed |= c,
+            None => {
+                if defer(ev) {
+                    note_missed(ev);
+                }
             }
-        };
-        if let Some(m) = t.messages.iter_mut().find(target) {
-            changed |= apply(&mut m.reactions, ev);
         }
     }
     changed
@@ -260,6 +417,76 @@ pub fn add_mine(reactions: &mut Vec<MsgReaction>, emoji: &str) {
 pub fn remove_mine(reactions: &mut Vec<MsgReaction>) {
     reactions.retain(|r| r.uid != "0");
     reactions.push(MsgReaction { uid: "0".into(), emoji: String::new(), ts: 0 });
+}
+
+/// Undo one optimistic change after the server rejected the send (`WorkerCmd::React` failure).
+///
+/// Removes **one** pending entry (`ts == 0`) of `uid` whose emoji is exactly `emoji` — the last
+/// one, which is the tap that was just sent. Entries of other people, entries settled by the
+/// server's echo (`ts != 0`), pending taps with another emoji and pre-v0.1.3 rows (empty `uid`,
+/// reactor unknown) are never touched. Pass `emoji == ""` to undo a failed "gỡ cảm xúc": that
+/// drops its pending removal marker. Returns `true` when an entry was removed; calling it twice
+/// is harmless (the second call finds nothing).
+///
+/// For a failed removal the taps that [`remove_mine`] deleted are gone locally; capture them with
+/// [`snapshot_mine`] before the optimistic call and put them back with [`restore_mine`].
+///
+/// Intended hook — **not wired yet** (this session only owns `reaction.rs`): the react failure
+/// path in `gui/worker.rs` + `gui.rs` should find the message by `(thread_id, msg_id)` and call
+/// this. Today that path reports `GuiEvent::StatusUpdate("Thả cảm xúc thất bại: …")`;
+/// `GuiEvent::SendFailed` is the text-message variant and can carry a reaction only after a
+/// follow-up change outside this file.
+pub fn rollback_mine(msg: &mut crate::chat::ChatMessage, uid: &str, emoji: &str) -> bool {
+    if uid.is_empty() {
+        // Legacy rows have no reactor; there is nothing that could be "mine" to roll back.
+        return false;
+    }
+    let Some(pos) = msg
+        .reactions
+        .iter()
+        .rposition(|r| r.uid == uid && r.emoji == emoji && r.ts == 0)
+    else {
+        return false;
+    };
+    msg.reactions.remove(pos);
+    true
+}
+
+/// This account's entries, to copy before an optimistic [`remove_mine`] whose failure would
+/// otherwise lose them. Pair with [`restore_mine`].
+pub fn snapshot_mine(reactions: &[MsgReaction], uid: &str) -> Vec<MsgReaction> {
+    if uid.is_empty() {
+        return Vec::new();
+    }
+    reactions.iter().filter(|r| r.uid == uid).cloned().collect()
+}
+
+/// Undo an optimistic [`remove_mine`] after the send failed: drop the optimistic state (including
+/// the pending removal marker) and put the [`snapshot_mine`] entries back where this account's
+/// first entry was, so the chip's first-seen order does not shuffle. Other people's entries and
+/// legacy rows are kept as they are. Returns `true` when the list changed; a second call with the
+/// same snapshot is a no-op.
+pub fn restore_mine(reactions: &mut Vec<MsgReaction>, uid: &str, saved: &[MsgReaction]) -> bool {
+    if uid.is_empty() {
+        return false;
+    }
+    let first = reactions.iter().position(|r| r.uid == uid);
+    let mut restored: Vec<MsgReaction> =
+        reactions.iter().filter(|r| r.uid != uid).cloned().collect();
+    match first {
+        Some(pos) => {
+            let pos = pos.min(restored.len());
+            for (offset, entry) in saved.iter().enumerate() {
+                restored.insert(pos + offset, entry.clone());
+            }
+        }
+        None => restored.extend(saved.iter().cloned()),
+    }
+    if restored == *reactions {
+        return false;
+    }
+    *reactions = restored;
+    true
 }
 
 pub fn summary(reactions: &[MsgReaction]) -> ReactionSummary {
@@ -370,6 +597,7 @@ mod tests {
 
     #[test]
     fn apply_to_threads_matches_own_message_by_cli_msg_id() {
+        clear_deferred();
         let mut t = thread_with("222", "8447783931887");
         t.messages[0].cli_msg_id = Some("1793705979715".into());
         let mut threads = vec![t];
@@ -581,6 +809,7 @@ mod tests {
 
     #[test]
     fn apply_to_threads_updates_matching_message() {
+        clear_deferred();
         let mut threads = vec![thread_with("222", "7001")];
         assert!(apply_to_threads(&mut threads, &[ev("222", false, "7001", "222", "❤️", 5)]));
         assert_eq!(threads[0].messages[0].reactions.len(), 1);
@@ -588,10 +817,13 @@ mod tests {
 
     #[test]
     fn apply_to_threads_ignores_unknown_thread_or_message() {
+        clear_deferred();
         let mut threads = vec![thread_with("222", "7001")];
         let events = [ev("999", false, "7001", "222", "❤️", 5), ev("222", false, "1", "222", "❤️", 5)];
         assert!(!apply_to_threads(&mut threads, &events));
         assert!(threads[0].messages[0].reactions.is_empty());
+        // Missing targets are queued for a later replay, not lost.
+        assert_eq!(deferred_events(), events.to_vec());
     }
 
     #[test]
@@ -601,5 +833,218 @@ mod tests {
         assert!(!can_react(&msg("out_1")));
         assert!(!can_react(&msg("local_2")));
         assert!(can_react(&msg("7001")));
+    }
+
+    // --- Server payload shapes that differ from the common one (BAN_GIAO §8) ----------------
+
+    /// `content` as an object (not a JSON string), `uidFrom`/`idTo` as numbers and `gMsgID` as a
+    /// string all name the same event.
+    #[test]
+    fn content_object_with_numeric_ids_and_string_gmsgid() {
+        let p = push_612(
+            vec![json!({
+                "uidFrom": 222,
+                "idTo": 0,
+                "ts": "1793628066838",
+                "content": {
+                    "rIcon": "/-heart",
+                    "rType": 5,
+                    "source": 6,
+                    "rMsg": [{ "gMsgID": "8447783931887", "cMsgID": "1793705979715", "msgType": 1 }],
+                },
+            })],
+            vec![],
+        );
+        let mut expected = ev("222", false, "8447783931887", "222", "❤️", 1793628066838);
+        expected.cli_msg_id = "1793705979715".into();
+        assert_eq!(extract_events(&p, SELF_UID, CLOUD), vec![expected]);
+    }
+
+    /// Numeric `uidFrom` 0 (this account) plus object `content` inside `data` sent as a JSON
+    /// string.
+    #[test]
+    fn numeric_self_uid_and_object_content_inside_json_string_data() {
+        let data = json!({
+            "reacts": [{
+                "uidFrom": 0,
+                "idTo": 222,
+                "ts": 7,
+                "content": { "rIcon": "/-strong", "rMsg": [{ "gMsgID": 42, "cMsgID": 0 }] },
+            }],
+            "reactGroups": [],
+        });
+        let p = json!({ "data": data.to_string() });
+        let mut expected = ev("222", false, "42", "0", "👍", 7);
+        expected.cli_msg_id = "0".into();
+        assert_eq!(extract_events(&p, SELF_UID, CLOUD), vec![expected]);
+    }
+
+    /// A JSON writer may serialise 64-bit ids and `ts` as floats; `7001.0` must still match the
+    /// message id `"7001"`, and `gMsgID 0.0` must still fall back to `cMsgID`.
+    #[test]
+    fn integral_float_ids_and_ts_are_normalised() {
+        let p = push_612(
+            vec![json!({
+                "uidFrom": 222.0,
+                "idTo": 0.0,
+                "ts": 1793628066838.0,
+                "content": { "rIcon": "/-heart", "rMsg": [{ "gMsgID": 7001.0, "cMsgID": 0.0 }] },
+            })],
+            vec![],
+        );
+        let mut expected = ev("222", false, "7001", "222", "❤️", 1793628066838);
+        expected.cli_msg_id = "0".into();
+        assert_eq!(extract_events(&p, SELF_UID, CLOUD), vec![expected]);
+
+        let p = push_612(
+            vec![json!({
+                "uidFrom": "0",
+                "idTo": "222",
+                "ts": 12,
+                "content": { "rIcon": ":>", "rMsg": [{ "gMsgID": 0.0, "cMsgID": 1793705979715_u64 }] },
+            })],
+            vec![],
+        );
+        let evs = extract_events(&p, SELF_UID, CLOUD);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].msg_id, "", "gMsgID 0.0 is still 0, not id \"0.0\"");
+        assert_eq!(evs[0].cli_msg_id, "1793705979715");
+        assert_eq!(evs[0].thread_id, "222");
+    }
+
+    /// Garbage `content` values are ignored instead of panicking or turning into a removal.
+    #[test]
+    fn malformed_content_is_ignored() {
+        let reacts: Vec<_> = [json!(123), json!("not json"), json!([]), json!(null), json!({ "rMsg": [] })]
+            .into_iter()
+            .map(|content| json!({ "uidFrom": "222", "idTo": "0", "ts": 5, "content": content }))
+            .collect();
+        assert!(extract_events(&push_612(reacts, vec![]), SELF_UID, CLOUD).is_empty());
+    }
+
+    // --- Events outside the in-memory window are queued instead of lost ----------------------
+
+    #[test]
+    fn missed_event_is_queued_once_and_replayed_when_the_message_appears() {
+        clear_deferred();
+        let mut threads = vec![thread_with("222", "7001")];
+        let missing = ev("222", false, "9999", "222", "❤️", 5);
+
+        assert!(!apply_to_threads(&mut threads, std::slice::from_ref(&missing)));
+        assert_eq!(deferred_events(), vec![missing.clone()]);
+        // The same change from the socket and from `lp_control` is queued only once.
+        assert!(!apply_to_threads(&mut threads, std::slice::from_ref(&missing)));
+        assert_eq!(deferred_events().len(), 1);
+
+        // "Tải thêm tin nhắn cũ" brings the message; a later batch replays the queue.
+        threads[0]
+            .messages
+            .push(crate::chat::ChatMessage { id: "9999".into(), ..Default::default() });
+        assert!(apply_to_threads(&mut threads, &[]));
+        assert!(deferred_events().is_empty());
+        assert_eq!(threads[0].messages[1].reactions.len(), 1);
+        assert!(!apply_deferred(&mut threads), "nothing left to replay");
+    }
+
+    #[test]
+    fn deferred_queue_is_bounded_and_keeps_the_newest_events() {
+        clear_deferred();
+        let mut threads: Vec<crate::chat::Thread> = Vec::new();
+        for i in 0..(MAX_DEFERRED + 5) {
+            let e = ev("999", false, &format!("{}", 10_000 + i), "222", "❤️", i as i64 + 1);
+            assert!(!apply_to_threads(&mut threads, std::slice::from_ref(&e)));
+        }
+        let queued = deferred_events();
+        assert_eq!(queued.len(), MAX_DEFERRED);
+        assert_eq!(queued[0].msg_id, "10005", "oldest five were evicted");
+        assert_eq!(
+            queued[MAX_DEFERRED - 1].msg_id,
+            format!("{}", 10_000 + MAX_DEFERRED + 4),
+            "the newest event is still queued"
+        );
+        clear_deferred();
+    }
+
+    #[test]
+    fn missed_event_logging_is_rate_limited() {
+        assert!(missed_log_due(1), "the first miss is always logged");
+        assert!(!missed_log_due(2));
+        assert!(!missed_log_due(MISSED_LOG_EVERY - 1));
+        assert!(missed_log_due(MISSED_LOG_EVERY));
+        assert!(!missed_log_due(MISSED_LOG_EVERY + 1));
+        assert!(missed_log_due(MISSED_LOG_EVERY * 2));
+    }
+
+    // --- Rollback of optimistic taps / removals when the send fails --------------------------
+
+    #[test]
+    fn rollback_mine_removes_only_my_pending_entry() {
+        let pending = MsgReaction { uid: "0".into(), emoji: "👍".into(), ts: 0 };
+        let settled = MsgReaction { uid: "0".into(), emoji: "👍".into(), ts: 1_793_550_037_212 };
+        let peer = MsgReaction { uid: "222".into(), emoji: "👍".into(), ts: 5 };
+        let legacy = MsgReaction { uid: String::new(), emoji: "👍".into(), ts: 0 };
+        let pending_other_emoji = MsgReaction { uid: "0".into(), emoji: "😆".into(), ts: 0 };
+        let mut msg = crate::chat::ChatMessage {
+            reactions: vec![
+                pending,
+                settled.clone(),
+                peer.clone(),
+                legacy.clone(),
+                pending_other_emoji.clone(),
+            ],
+            ..Default::default()
+        };
+
+        assert!(rollback_mine(&mut msg, "0", "👍"));
+        assert_eq!(
+            msg.reactions,
+            vec![settled, peer, legacy, pending_other_emoji],
+            "only my pending tap of this emoji goes"
+        );
+        // Idempotent: a repeated rollback for the same failed tap changes nothing.
+        assert!(!rollback_mine(&mut msg, "0", "👍"));
+        assert_eq!(msg.reactions.len(), 4);
+        // Pre-v0.1.3 rows have no reactor (`uid` empty), so they can never be rolled back.
+        assert!(!rollback_mine(&mut msg, "", "👍"));
+        assert!(msg.reactions.iter().any(|r| r.uid.is_empty()));
+    }
+
+    #[test]
+    fn rollback_mine_clears_a_failed_removal_marker() {
+        let peer = MsgReaction { uid: "222".into(), emoji: "❤️".into(), ts: 9 };
+        let mut msg = crate::chat::ChatMessage {
+            reactions: vec![
+                peer.clone(),
+                MsgReaction { uid: "0".into(), emoji: String::new(), ts: 0 },
+            ],
+            ..Default::default()
+        };
+
+        assert!(rollback_mine(&mut msg, "0", ""));
+        assert_eq!(msg.reactions, vec![peer]);
+        assert_eq!(summary(&msg.reactions).total, 1);
+        assert!(!rollback_mine(&mut msg, "0", ""));
+    }
+
+    #[test]
+    fn snapshot_and_restore_undo_a_failed_removal() {
+        let peer = MsgReaction { uid: "222".into(), emoji: "❤️".into(), ts: 10 };
+        let mine_love = MsgReaction { uid: "0".into(), emoji: "❤️".into(), ts: 20 };
+        let mine_laugh = MsgReaction { uid: "0".into(), emoji: "😆".into(), ts: 21 };
+        let mut reactions = vec![peer.clone(), mine_love.clone(), mine_laugh.clone()];
+
+        let saved = snapshot_mine(&reactions, "0");
+        assert_eq!(saved, vec![mine_love.clone(), mine_laugh.clone()]);
+        remove_mine(&mut reactions); // optimistic: my taps go, a pending removal marker stays
+        assert_eq!(summary(&reactions).mine, None);
+        assert!(reactions.iter().any(|r| r.uid == "0" && r.emoji.is_empty() && r.ts == 0));
+
+        assert!(restore_mine(&mut reactions, "0", &saved));
+        assert_eq!(reactions, vec![peer, mine_love, mine_laugh]);
+        assert_eq!(summary(&reactions).mine.as_deref(), Some("😆"));
+        // Idempotent with the same snapshot; an empty uid cannot restore anything.
+        assert!(!restore_mine(&mut reactions, "0", &saved));
+        assert!(!restore_mine(&mut reactions, "", &saved));
+        assert!(snapshot_mine(&reactions, "").is_empty());
     }
 }
