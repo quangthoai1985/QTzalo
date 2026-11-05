@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Biển khu bếp ăn</title>
+<style>
+@font-face { font-family: 'Baloo2'; font-weight: 800; src: url(fonts/baloo2-latin.woff2) format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F; }
+@font-face { font-family: 'Baloo2'; font-weight: 800; src: url(fonts/baloo2-latinext.woff2) format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF; }
+@font-face { font-family: 'Baloo2'; font-weight: 800; src: url(fonts/baloo2-vi.woff2) format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB; }
+@page { size: 420mm 297mm; margin: 0; }
+html, body { margin: 0; padding: 0; background: #fff; }
+.page { width: 420mm; height: 297mm; page-break-after: always; break-after: page; overflow: hidden; background: #fbf8f2; }
+.page:last-child { page-break-after: auto; break-after: auto; }
+svg { display: block; width: 420mm; height: 297mm; }
+text { font-family: 'Baloo2', sans-serif; font-weight: 800; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const OL = '#5b4636';           // outline colour
+const SKIN = '#ffdcc2', SKIN_OL = '#e2ad8a';
+const HAIR = '#5a3420';
+
+/* ---------- small helpers ---------- */
+const st = (w = 3.5, c = OL) => `stroke="${c}" stroke-width="${w}" stroke-linejoin="round" stroke-linecap="round"`;
+
+function eyes(cx, cy, r, gap = 0.36, size = 0.13) {
+  const ex = r * gap, rx = r * size, ry = r * size * 1.3;
+  return [-1, 1].map(s => `
+    <ellipse cx="${cx + s * ex}" cy="${cy}" rx="${rx}" ry="${ry}" fill="#2b1d14"/>
+    <circle cx="${cx + s * ex + rx * 0.35}" cy="${cy - ry * 0.4}" r="${rx * 0.38}" fill="#fff"/>`).join('');
+}
+function happyEyes(cx, cy, r) { // closed ^ ^ eyes
+  return [-1, 1].map(s => {
+    const x = cx + s * r * 0.36;
+    return `<path d="M ${x - r * 0.13} ${cy + r * 0.04} Q ${x} ${cy - r * 0.16} ${x + r * 0.13} ${cy + r * 0.04}" fill="none" ${st(r * 0.06, '#2b1d14')}/>`;
+  }).join('');
+}
+function blush(cx, cy, r, gap = 0.6) {
+  return [-1, 1].map(s => `<ellipse cx="${cx + s * r * gap}" cy="${cy}" rx="${r * 0.17}" ry="${r * 0.1}" fill="#ff8fa3" opacity="0.65"/>`).join('');
+}
+function mouth(cx, cy, r, open = true) {
+  if (!open) return `<path d="M ${cx - r * 0.16} ${cy} Q ${cx} ${cy + r * 0.16} ${cx + r * 0.16} ${cy}" fill="none" ${st(r * 0.05, '#7a2d2d')}/>`;
+  return `<path d="M ${cx - r * 0.18} ${cy} Q ${cx} ${cy + r * 0.04} ${cx + r * 0.18} ${cy} Q ${cx + r * 0.12} ${cy + r * 0.26} ${cx} ${cy + r * 0.26} Q ${cx - r * 0.12} ${cy + r * 0.26} ${cx - r * 0.18} ${cy} Z" fill="#b8434f"/>
+          <path d="M ${cx - r * 0.08} ${cy + r * 0.2} Q ${cx} ${cy + r * 0.13} ${cx + r * 0.08} ${cy + r * 0.2} Q ${cx} ${cy + r * 0.26} ${cx - r * 0.08} ${cy + r * 0.2} Z" fill="#ff8b8b"/>`;
+}
+function objFace(cx, cy, r, happy = false) {
+  return (happy ? happyEyes(cx, cy, r) : eyes(cx, cy, r, 0.36, 0.11)) + blush(cx, cy + r * 0.2, r, 0.62) + mouth(cx, cy + r * 0.18, r * 0.8);
+}
+
+/* chef kid head */
+function kidHead(cx, cy, r, { pigtails = false, hat = true, hair = HAIR } = {}) {
+  let s = '';
+  if (pigtails) {
+    s += [-1, 1].map(k => `<circle cx="${cx + k * r * 1.02}" cy="${cy + r * 0.3}" r="${r * 0.32}" fill="${hair}" ${st()}/>
+      <circle cx="${cx + k * r * 0.86}" cy="${cy + r * 0.12}" r="${r * 0.09}" fill="#ff7f9d"/>`).join('');
+  }
+  // back hair
+  s += `<path d="M ${cx - r * 1.02} ${cy + r * 0.25} Q ${cx - r * 1.1} ${cy - r * 1.0} ${cx} ${cy - r * 1.0} Q ${cx + r * 1.1} ${cy - r * 1.0} ${cx + r * 1.02} ${cy + r * 0.25} Z" fill="${hair}" ${st()}/>`;
+  // ears
+  s += [-1, 1].map(k => `<circle cx="${cx + k * r * 0.98}" cy="${cy + r * 0.12}" r="${r * 0.17}" fill="${SKIN}" ${st(3, SKIN_OL)}/>`).join('');
+  // face
+  s += `<ellipse cx="${cx}" cy="${cy + r * 0.05}" rx="${r}" ry="${r * 0.93}" fill="${SKIN}" ${st(3.5, SKIN_OL)}/>`;
+  // bangs
+  s += `<path d="M ${cx - r * 0.98} ${cy - r * 0.05} Q ${cx - r * 0.95} ${cy - r * 0.92} ${cx} ${cy - r * 0.9}
+        Q ${cx + r * 0.95} ${cy - r * 0.92} ${cx + r * 0.98} ${cy - r * 0.05}
+        Q ${cx + r * 0.75} ${cy - r * 0.42} ${cx + r * 0.42} ${cy - r * 0.46}
+        Q ${cx + r * 0.3} ${cy - r * 0.3} ${cx + r * 0.05} ${cy - r * 0.38}
+        Q ${cx - r * 0.2} ${cy - r * 0.3} ${cx - r * 0.38} ${cy - r * 0.45}
+        Q ${cx - r * 0.72} ${cy - r * 0.38} ${cx - r * 0.98} ${cy - r * 0.05} Z" fill="${hair}" ${st()}/>`;
+  s += eyes(cx, cy + r * 0.12, r, 0.36, 0.13) + blush(cx, cy + r * 0.4, r, 0.62) + mouth(cx, cy + r * 0.4, r);
+  if (hat) {
+    s += `<g fill="#fff" ${st(3.5, '#b9b2a8')}>
+      <circle cx="${cx - r * 0.6}" cy="${cy - r * 1.18}" r="${r * 0.52}"/>
+      <circle cx="${cx + r * 0.6}" cy="${cy - r * 1.18}" r="${r * 0.52}"/>
+      <circle cx="${cx}" cy="${cy - r * 1.42}" r="${r * 0.62}"/>
+      <rect x="${cx - r * 0.95}" y="${cy - r * 1.02}" width="${r * 1.9}" height="${r * 0.42}" rx="${r * 0.16}"/>
+    </g>
+    <path d="M ${cx - r * 0.6} ${cy - r * 1.18} Q ${cx - r * 0.3} ${cy - r * 1.3} ${cx - r * 0.1} ${cy - r * 1.1}" fill="none" ${st(3, '#ddd6cc')}/>`;
+  }
+  return s;
+}
+
+function arm(d, c = '#fff', w = 28) { return `<path d="${d}" fill="none" ${st(w + 7)}/><path d="${d}" fill="none" ${st(w, c)}/>`; }
+function hand(x, y, r = 16) { return `<circle cx="${x}" cy="${y}" r="${r}" fill="${SKIN}" ${st(3, SKIN_OL)}/>`; }
+
+/* produce */
+function leafBlob(x, y, s, c1 = '#5fae3e', c2 = '#86cc5a') {
+  return `<g transform="translate(${x} ${y}) scale(${s})">
+    <path d="M 0 40 C -40 20 -45 -30 -15 -50 C -5 -70 20 -65 25 -45 C 50 -35 45 10 0 40 Z" fill="${c1}" ${st(3.5 / s, '#3e7a2a')}/>
+    <path d="M 0 38 Q 2 0 -5 -45" fill="none" ${st(3 / s, c2)}/>
+  </g>`;
+}
+function tomato(x, y, r) {
+  return `<circle cx="${x}" cy="${y}" r="${r}" fill="#e8432f" ${st(3.5, '#a62a1d')}/>
+    <ellipse cx="${x - r * 0.35}" cy="${y - r * 0.35}" rx="${r * 0.22}" ry="${r * 0.13}" fill="#fff" opacity=".6"/>
+    <path d="M ${x - r * 0.4} ${y - r * 0.8} L ${x} ${y - r * 0.6} L ${x + r * 0.4} ${y - r * 0.85} L ${x + r * 0.1} ${y - r * 0.95} L ${x} ${y - r * 1.15} L ${x - r * 0.1} ${y - r * 0.95} Z" fill="#4c9a32" ${st(2.5, '#2f6e1f')}/>`;
+}
+function carrot(x, y, len, ang, w = 26) {
+  return `<g transform="translate(${x} ${y}) rotate(${ang})">
+    <path d="M 0 ${-w / 2} Q ${len * 0.5} ${-w * 0.45} ${len} 0 Q ${len * 0.5} ${w * 0.45} 0 ${w / 2} Q ${-w * 0.25} 0 0 ${-w / 2} Z" fill="#f28a26" ${st(3.5, '#b85e12')}/>
+    <path d="M ${len * 0.3} ${-w * 0.3} l 0 ${w * 0.2} M ${len * 0.55} ${w * 0.1} l 0 ${w * 0.18} M ${len * 0.2} ${w * 0.15} l 0 ${w * 0.15}" ${st(2.5, '#c96a16')}/>
+    <path d="M -2 0 Q -30 -25 -40 -20 M -2 0 Q -38 -2 -46 6 M -2 0 Q -28 20 -36 28" fill="none" ${st(7, '#5aa83a')}/>
+  </g>`;
+}
+function broccoli(x, y, s) {
+  return `<g transform="translate(${x} ${y}) scale(${s})">
+    <path d="M -10 10 L -14 42 Q 0 48 14 42 L 10 10 Z" fill="#a7d47a" ${st(3 / s, '#5f8f3a')}/>
+    <g fill="#4f9a3a" ${st(3 / s, '#2f6a22')}>
+      <circle cx="-22" cy="0" r="18"/><circle cx="22" cy="0" r="18"/><circle cx="0" cy="-14" r="22"/><circle cx="-8" cy="8" r="14"/><circle cx="10" cy="8" r="14"/>
+    </g>
+    <g fill="#79c255"><circle cx="-6" cy="-20" r="5"/><circle cx="-26" cy="-6" r="4"/><circle cx="18" cy="-6" r="4"/></g>
+  </g>`;
+}
+
+/* decorations */
+const deco = {
+  cloud: (x, y, s = 1) => `<g transform="translate(${x} ${y}) scale(${s})"><path d="M -70 25 Q -95 25 -92 3 Q -90 -18 -62 -16 Q -55 -48 -20 -45 Q 5 -62 30 -40 Q 62 -46 66 -14 Q 95 -10 90 10 Q 88 27 62 25 Z" fill="#a9d4f5" ${st(4 / s, '#79b3e0')}/></g>`,
+  star: (x, y, s = 1, c = '#ffd23f', o = '#e8a917') => {
+    const pts = []; for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? 24 : 54; pts.push(`${(Math.cos(a) * r).toFixed(1)},${(Math.sin(a) * r).toFixed(1)}`); }
+    return `<g transform="translate(${x} ${y}) scale(${s}) rotate(-8)"><polygon points="${pts.join(' ')}" fill="${c}" ${st(5 / s, o)} stroke-linejoin="round"/></g>`;
+  },
+  heart: (x, y, s = 1) => `<g transform="translate(${x} ${y}) scale(${s}) rotate(-10)"><path d="M 0 42 C -60 0 -55 -45 -25 -45 C -10 -45 0 -32 0 -22 C 0 -32 10 -45 25 -45 C 55 -45 60 0 0 42 Z" fill="#ff7fa0" ${st(4.5 / s, '#e0567c')}/><ellipse cx="-24" cy="-26" rx="9" ry="6" fill="#fff" opacity=".6"/></g>`,
+  flower: (x, y, s = 1, c = '#ff9ab8', o = '#e86d93') => {
+    let p = ''; for (let i = 0; i < 6; i++) { const a = i * 60 * Math.PI / 180; p += `<circle cx="${(Math.cos(a) * 26).toFixed(1)}" cy="${(Math.sin(a) * 26).toFixed(1)}" r="20" fill="${c}" ${st(3.5, o)}/>`; }
+    return `<g transform="translate(${x} ${y}) scale(${s})">
+      <path d="M 0 30 Q 4 80 0 120" fill="none" ${st(7, '#5aa83a')}/>
+      <path d="M 2 95 Q 40 70 55 85 Q 40 105 2 95 Z" fill="#6dbb45" ${st(3, '#3e7a2a')}/>
+      <path d="M -2 80 Q -40 55 -55 70 Q -40 90 -2 80 Z" fill="#6dbb45" ${st(3, '#3e7a2a')}/>
+      ${p}<circle cx="0" cy="0" r="17" fill="#ffe27a" ${st(3.5, '#e8b21c')}/></g>`;
+  },
+  leaf: (x, y, s = 1) => `<g transform="translate(${x} ${y}) scale(${s})">
+      <path d="M 0 60 Q -2 0 4 -60" fill="none" ${st(6, '#4f9a32')}/>
+      <path d="M 2 -10 Q -45 -30 -40 -75 Q 5 -55 2 -10 Z" fill="#7cc451" ${st(3.5, '#3e7a2a')}/>
+      <path d="M 2 25 Q 50 0 50 -45 Q 8 -30 2 25 Z" fill="#6dbb45" ${st(3.5, '#3e7a2a')}/>
+      <path d="M 0 50 Q -45 35 -50 -5 Q -8 10 0 50 Z" fill="#8bd060" ${st(3.5, '#3e7a2a')}/></g>`,
+};
+
+/* ---------- scenes (absolute coords in the 1400 x 990 board) ---------- */
+const shadow = (cx, cy, rx, ry = 18) => `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="#000" opacity=".08"/>`;
+
+function sceneTruck() {
+  return `${shadow(700, 640, 300, 20)}
+  <!-- produce behind box -->
+  <path d="M 700 470 L 715 330 Q 745 300 770 330 L 790 470 Z" fill="#d7b48a" ${st()}/>
+  <rect x="800" y="320" width="44" height="120" rx="12" fill="#f4e3a1" ${st()}/>
+  <rect x="808" y="300" width="28" height="30" rx="6" fill="#7ab648" ${st()}/>
+  ${leafBlob(880, 360, 1.25)}${leafBlob(935, 380, 1.1, '#4f9a32')}${leafBlob(755, 360, 1.0, '#6dbb45')}
+  ${carrot(770, 420, 120, -40, 34)}
+  ${tomato(735, 430, 32)}${tomato(905, 440, 26)}
+  ${leafBlob(845, 400, 0.9, '#86cc5a')}
+  <!-- box -->
+  <path d="M 680 450 L 960 450 L 960 580 L 680 580 Z" fill="#dba66b" ${st()}/>
+  <path d="M 680 450 L 650 410 L 720 410 L 745 450 Z" fill="#e8bb83" ${st()}/>
+  <path d="M 960 450 L 985 410 L 920 410 L 900 450 Z" fill="#e8bb83" ${st()}/>
+  <path d="M 700 500 L 940 500" ${st(3, '#b9824a')}/>
+  <!-- chassis -->
+  <rect x="455" y="560" width="525" height="48" rx="16" fill="#6aa82e" ${st()}/>
+  <!-- cab -->
+  <path d="M 465 600 L 465 470 Q 465 395 535 390 L 640 386 Q 695 386 700 440 L 705 600 Z" fill="#8cc63f" ${st()}/>
+  <path d="M 492 468 Q 496 420 540 417 L 628 414 Q 662 414 664 446 L 667 468 Z" fill="#c4e9f8" ${st(3.5, '#5f8fa5')}/>
+  <path d="M 520 455 L 560 425 M 545 460 L 585 428" ${st(6, '#fff')} opacity=".8"/>
+  ${eyes(565, 515, 110, 0.38, 0.14)}
+  ${blush(565, 555, 110, 0.62)}
+  ${mouth(565, 545, 95)}
+  <rect x="452" y="570" width="40" height="22" rx="8" fill="#ffd54a" ${st()}/>
+  <!-- wheels -->
+  ${[545, 870].map(x => `<circle cx="${x}" cy="610" r="46" fill="#4a4a4a" ${st()}/><circle cx="${x}" cy="610" r="22" fill="#e1e1e1" ${st(3)}/><circle cx="${x}" cy="610" r="7" fill="#999"/>`).join('')}`;
+}
+
+function sceneWarehouse() {
+  return `${shadow(700, 640, 250)}
+  <polygon points="495,330 700,215 905,330 905,625 495,625" fill="#cdbfab" ${st()}/>
+  <circle cx="700" cy="285" r="30" fill="#8a7f74" ${st()}/>
+  <path d="M 700 255 L 700 315 M 670 285 L 730 285" ${st(4, '#cdbfab')}/>
+  <polyline points="465,345 700,210 935,345" fill="none" stroke="#2c5f9e" stroke-width="44" stroke-linejoin="round" stroke-linecap="round"/>
+  <polyline points="465,345 700,210 935,345" fill="none" stroke="#3f7fcb" stroke-width="30" stroke-linejoin="round" stroke-linecap="round"/>
+  <rect x="535" y="355" width="330" height="262" fill="#4b4039" ${st()}/>
+  <!-- upper shelf items -->
+  <rect x="555" y="395" width="125" height="78" rx="6" fill="#2f6db5" ${st()}/>
+  <rect x="550" y="388" width="135" height="18" rx="5" fill="#3f86d6" ${st()}/>
+  <rect x="595" y="425" width="45" height="18" rx="3" fill="#fff"/>
+  <rect x="700" y="405" width="88" height="68" fill="#dba66b" ${st()}/><path d="M 744 405 L 744 425" ${st(3)}/>
+  <rect x="795" y="425" width="58" height="48" fill="#e2b178" ${st()}/>
+  <rect x="770" y="363" width="70" height="42" fill="#e2b178" ${st()}/>
+  <rect x="540" y="472" width="320" height="16" fill="#c48d57" ${st()}/>
+  <!-- lower shelf items -->
+  <rect x="555" y="510" width="125" height="92" fill="#dba66b" ${st()}/><path d="M 555 535 L 680 535" ${st(3, '#b9824a')}/>
+  ${[['#e8432f', 720], ['#5fae3e', 770], ['#5fae3e', 820]].map(([c, x]) => `
+    <rect x="${x - 20}" y="540" width="40" height="62" rx="6" fill="#ddd" ${st()}/>
+    <rect x="${x - 20}" y="555" width="40" height="30" fill="${c}"/>
+    <ellipse cx="${x}" cy="540" rx="20" ry="6" fill="#eee" ${st(3)}/>`).join('')}
+  <rect x="540" y="600" width="320" height="16" fill="#c48d57" ${st()}/>
+  <rect x="470" y="620" width="460" height="22" rx="6" fill="#9b9b9b" ${st()}/>`;
+}
+
+function sceneChop() {
+  return `${shadow(700, 640, 280)}
+  <!-- body -->
+  <path d="M 545 560 Q 545 410 630 405 Q 715 410 715 560 Z" fill="#fff" ${st()}/>
+  <path d="M 585 560 L 585 450 Q 630 470 675 450 L 675 560 Z" fill="#6dbb45" ${st()}/>
+  <path d="M 590 420 L 600 455 M 670 420 L 660 455" ${st(5, '#4f9a32')}/>
+  ${kidHead(630, 320, 78)}
+  <!-- board -->
+  <rect x="470" y="555" width="330" height="54" rx="12" fill="#d99b5c" ${st()}/>
+  <path d="M 490 575 L 560 575 M 650 590 L 770 590" ${st(3, '#bb7d40')}/>
+  ${carrot(520, 555, 170, 0, 34)}
+  <ellipse cx="720" cy="560" rx="16" ry="7" fill="#f28a26" ${st(3, '#b85e12')}/>
+  <ellipse cx="755" cy="560" rx="16" ry="7" fill="#f28a26" ${st(3, '#b85e12')}/>
+  <!-- knife -->
+  <polygon points="702,512 718,524 672,562 648,553" fill="#dfe4e8" ${st()}/>
+  <path d="M 728 486 L 708 514" ${st(16, '#3a3a3a')}/>
+  ${arm('M 562 445 Q 560 515 588 545')}${arm('M 700 445 Q 726 470 718 500')}
+  ${hand(588, 545, 18)}${hand(718, 500, 18)}
+  <!-- colander -->
+  ${leafBlob(820, 470, 1.1)}${leafBlob(870, 455, 1.2, '#4f9a32')}${leafBlob(915, 475, 1.0, '#86cc5a')}
+  ${tomato(895, 495, 30)}
+  <path d="M 770 495 L 960 495 Q 955 610 865 615 Q 775 610 770 495 Z" fill="#c9ced3" ${st()}/>
+  ${Array.from({ length: 12 }, (_, i) => `<circle cx="${800 + (i % 6) * 26}" cy="${530 + Math.floor(i / 6) * 30}" r="5" fill="#8f979e"/>`).join('')}
+  <ellipse cx="865" cy="495" rx="98" ry="14" fill="#dde1e4" ${st()}/>`;
+}
+
+function sceneCook() {
+  return `${shadow(720, 645, 230)}
+  <!-- steam -->
+  <g fill="none" ${st(5, '#c9c4bd')}>
+    <path d="M 760 470 q -20 -30 0 -55 q 20 -25 0 -55"/>
+    <path d="M 810 450 q 20 -25 0 -50 q -20 -25 0 -45"/>
+  </g>
+  <circle cx="860" cy="385" r="16" fill="#fff" ${st(4, '#c9c4bd')}/><circle cx="890" cy="405" r="10" fill="#fff" ${st(4, '#c9c4bd')}/>
+  <!-- hanging utensils -->
+  <rect x="905" y="245" width="170" height="16" rx="8" fill="#c48d57" ${st()}/>
+  <path d="M 960 261 L 960 380" ${st(9, '#7d858c')}/><ellipse cx="960" cy="400" rx="22" ry="26" fill="#9aa3ab" ${st()}/>
+  <path d="M 1025 261 L 1025 360" ${st(9, '#7d858c')}/><rect x="1003" y="355" width="44" height="60" rx="8" fill="#9aa3ab" ${st()}/>
+  <path d="M 1016 370 L 1016 402 M 1025 370 L 1025 402 M 1034 370 L 1034 402" ${st(4, '#6d757c')}/>
+  <!-- chef body -->
+  <path d="M 520 590 Q 520 420 610 415 Q 700 420 700 590 Z" fill="#fff" ${st()}/>
+  <path d="M 610 430 L 610 590" ${st(3, '#ddd')}/><circle cx="595" cy="470" r="5" fill="#bbb"/><circle cx="595" cy="510" r="5" fill="#bbb"/>
+  ${kidHead(610, 325, 78)}
+  <!-- stove + pot -->
+  <ellipse cx="720" cy="625" rx="190" ry="22" fill="#3a3a3a"/>
+  <path d="M 570 515 L 870 515 L 860 600 Q 855 625 830 625 L 610 625 Q 585 625 580 600 Z" fill="#a3abb3" ${st()}/>
+  <rect x="535" y="525" width="45" height="22" rx="10" fill="#7d858c" ${st()}/><rect x="860" y="525" width="45" height="22" rx="10" fill="#7d858c" ${st()}/>
+  <ellipse cx="720" cy="515" rx="155" ry="22" fill="#f2d38a" ${st()}/>
+  <circle cx="680" cy="512" r="7" fill="#f28a26"/><circle cx="760" cy="516" r="6" fill="#5fae3e"/>
+  ${objFace(720, 568, 80, true)}
+  <!-- spoon & arm -->
+  <path d="M 540 430 L 690 520" ${st(13, '#a8743f')}/>
+  ${arm('M 545 455 Q 555 495 600 468')}
+  ${hand(600, 468, 18)}`;
+}
+
+function sceneTray() {
+  return `${shadow(700, 645, 260)}
+  <rect x="465" y="255" width="470" height="385" rx="40" fill="#b5bcc3" ${st()}/>
+  <rect x="482" y="272" width="436" height="351" rx="30" fill="#c9cfd5" ${st(2.5, '#9aa2a9')}/>
+  ${[[498, 288, 195, 160], [708, 288, 195, 160], [498, 463, 160, 145], [673, 463, 230, 145]].map(([x, y, w, h]) =>
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="18" fill="#e6e9ec" ${st(3, '#a7afb6')}/>`).join('')}
+  <!-- TL broccoli + tomato -->
+  ${broccoli(545, 360, 1.05)}${broccoli(620, 345, 1.15)}${broccoli(580, 400, 0.8)}
+  <path d="M 630 420 L 670 395 Q 680 425 650 435 Z" fill="#e8432f" ${st(3, '#a62a1d')}/>
+  <!-- TR chicken -->
+  <path d="M 735 330 Q 760 300 800 315" fill="none" ${st(10, '#5aa83a')}/>
+  ${leafBlob(760, 330, 0.6)}
+  <ellipse cx="760" cy="395" rx="42" ry="26" fill="#d7884a" ${st(3.5, '#9b5520')}/>
+  <ellipse cx="855" cy="395" rx="40" ry="26" fill="#d7884a" ${st(3.5, '#9b5520')}/>
+  <ellipse cx="805" cy="370" rx="58" ry="40" fill="#e09452" ${st(3.5, '#9b5520')}/>
+  <path d="M 775 365 Q 805 350 835 365 M 780 385 Q 805 372 830 385" fill="none" ${st(3, '#b8692d')}/>
+  ${tomato(870, 340, 20)}
+  <!-- BL carrots + broccoli -->
+  ${carrot(515, 560, 70, -15, 26).replace(/<path d="M -2 0[^>]*>/, '')}
+  ${carrot(530, 590, 70, 10, 26).replace(/<path d="M -2 0[^>]*>/, '')}
+  ${broccoli(615, 530, 0.95)}${broccoli(570, 505, 0.75)}
+  <!-- BR rice with face -->
+  <path d="M 700 590 Q 690 520 735 500 Q 750 478 785 485 Q 810 470 835 488 Q 870 492 878 530 Q 890 590 860 595 Z" fill="#fff" ${st(3.5, '#cfcfcf')}/>
+  ${Array.from({ length: 10 }, (_, i) => `<ellipse cx="${725 + (i * 37) % 140}" cy="${510 + (i * 23) % 70}" rx="7" ry="4" fill="none" ${st(2, '#ddd')}/>`).join('')}
+  ${objFace(788, 545, 70)}`;
+}
+
+function sceneServe() {
+  return `${shadow(700, 645, 290)}
+  <!-- table line -->
+  <rect x="470" y="605" width="460" height="22" rx="8" fill="#e8c9a0" ${st()}/>
+  <!-- left kid body -->
+  <path d="M 500 610 Q 500 440 585 435 Q 670 440 670 610 Z" fill="#ffd54a" ${st()}/>
+  <path d="M 535 610 L 535 480 Q 585 500 635 480 L 635 610 Z" fill="#6dbb45" ${st()}/>
+  ${kidHead(585, 340, 72, { pigtails: true })}
+  <!-- right kid body -->
+  <path d="M 735 610 Q 735 445 820 440 Q 905 445 905 610 Z" fill="#ffa8c0" ${st()}/>
+  <path d="M 770 610 L 770 485 Q 820 505 870 485 L 870 610 Z" fill="#6dbb45" ${st()}/>
+  ${kidHead(820, 345, 72, { pigtails: true, hair: '#6b3d24' })}
+  <!-- pot -->
+  <path d="M 520 545 L 700 545 L 692 600 Q 688 615 670 615 L 550 615 Q 532 615 528 600 Z" fill="#a3abb3" ${st()}/>
+  <rect x="500" y="552" width="28" height="16" rx="7" fill="#7d858c" ${st()}/>
+  <ellipse cx="610" cy="545" rx="92" ry="14" fill="#f2d38a" ${st()}/>
+  <!-- ladle -->
+  <path d="M 625 520 L 740 485" ${st(9, '#8f979e')}/>
+  <ellipse cx="748" cy="490" rx="22" ry="13" fill="#b9c0c6" ${st()}/>
+  ${arm('M 655 462 Q 664 488 645 500', '#ffd54a', 26)}
+  ${hand(645, 500, 17)}
+  <!-- bowl -->
+  <circle cx="770" cy="512" r="9" fill="#f28a26"/><circle cx="790" cy="508" r="9" fill="#5fae3e"/><circle cx="808" cy="515" r="8" fill="#e8432f"/>
+  <path d="M 735 520 L 845 520 Q 840 570 790 572 Q 740 570 735 520 Z" fill="#fff" ${st()}/>
+  <ellipse cx="790" cy="520" rx="55" ry="10" fill="#f2d38a" ${st(3)}/>
+  ${arm('M 755 470 Q 735 515 748 545', '#ffa8c0', 26)}${arm('M 885 470 Q 870 530 840 548', '#ffa8c0', 26)}
+  ${hand(748, 548, 16)}${hand(840, 550, 16)}`;
+}
+
+/* ---------- sign frame ---------- */
+const OUTER = 'M 60 260 Q 60 180 140 180 L 330 180 Q 382 180 404 136 Q 444 60 565 60 L 835 60 Q 956 60 996 136 Q 1018 180 1070 180 L 1260 180 Q 1340 180 1340 260 L 1340 850 Q 1340 930 1260 930 L 140 930 Q 60 930 60 850 Z';
+const INNER = 'M 96 270 Q 96 216 150 216 L 336 216 Q 404 216 434 158 Q 466 96 568 96 L 832 96 Q 934 96 966 158 Q 996 216 1064 216 L 1250 216 Q 1304 216 1304 270 L 1304 840 Q 1304 894 1250 894 L 150 894 Q 96 894 96 840 Z';
+const DASH  = 'M 120 280 Q 120 240 160 240 L 342 240 Q 420 240 456 172 Q 482 120 572 120 L 828 120 Q 918 120 944 172 Q 980 240 1058 240 L 1240 240 Q 1280 240 1280 280 L 1280 830 Q 1280 870 1240 870 L 160 870 Q 120 870 120 830 Z';
+
+function board(i, t) {
+  const grain = Array.from({ length: 14 }, (_, k) => {
+    const y = 70 + k * 64 + (k % 3) * 9;
+    return `<path d="M 40 ${y} Q 400 ${y - 14} 700 ${y + 6} T 1360 ${y - 4}" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="${k % 2 ? 4 : 7}"/>`;
+  }).join('');
+  return `<svg viewBox="0 0 1400 990" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="clip${i}"><path d="${OUTER}"/></clipPath>
+    <radialGradient id="cream${i}" cx="50%" cy="45%" r="70%"><stop offset="0" stop-color="#fffaf0"/><stop offset="1" stop-color="#f7eedc"/></radialGradient>
+  </defs>
+  <rect width="1400" height="990" fill="#fbf8f2"/>
+  <path d="${OUTER}" transform="translate(10 16)" fill="#000" opacity=".12"/>
+  <path d="${OUTER}" fill="${t.border}" stroke="${t.dark}" stroke-width="6"/>
+  <g clip-path="url(#clip${i})">${grain}</g>
+  <path d="${INNER}" fill="url(#cream${i})" stroke="${t.dark}" stroke-opacity=".5" stroke-width="4"/>
+  <path d="${DASH}" fill="none" stroke="${t.dark}" stroke-opacity=".55" stroke-width="4" stroke-dasharray="16 12"/>
+  <g transform="translate(700 430) scale(1.15) translate(-700 -430)">${t.scene()}</g>
+  ${t.deco}
+  <text class="label" x="700" y="825" text-anchor="middle" font-size="150" fill="${t.text}"
+        stroke="#fff" stroke-width="14" stroke-linejoin="round" paint-order="stroke">${t.label}</text>
+  </svg>`;
+}
+
+const SIGNS = [
+  { label: 'Khu tiếp phẩm', border: '#8dc63f', dark: '#5f9a24', text: '#2a7a1e', scene: sceneTruck,
+    deco: deco.cloud(215, 330, 0.9) + deco.flower(160, 720, 0.85) + deco.leaf(1235, 760, 0.9) },
+  { label: 'Kho lưu trữ', border: '#b8875c', dark: '#875833', text: '#7a4513', scene: sceneWarehouse,
+    deco: deco.star(210, 320, 0.9) + deco.leaf(1235, 770, 0.9) },
+  { label: 'Khu sơ chế', border: '#f3a0b4', dark: '#d9718c', text: '#e45b7c', scene: sceneChop,
+    deco: deco.heart(210, 325, 0.95) + deco.flower(1225, 640, 0.85, '#ffd54a', '#e8a917') },
+  { label: 'Khu chế biến', border: '#f8d05c', dark: '#d9aa2c', text: '#e5771a', scene: sceneCook,
+    deco: deco.star(210, 320, 0.85, '#6aaee8', '#3f86d6') + deco.flower(160, 700, 0.85, '#ffa654', '#e57a1c') },
+  { label: 'Khu thành phẩm', border: '#86b8e3', dark: '#5590c6', text: '#1d58a5', scene: sceneTray,
+    deco: deco.cloud(215, 330, 0.9) + deco.star(1230, 760, 0.85) },
+  { label: 'Khu chia thức ăn', border: '#ae92d4', dark: '#8668b6', text: '#563a96', scene: sceneServe,
+    deco: deco.heart(210, 325, 0.95) + deco.leaf(1240, 770, 0.85) },
+];
+
+document.getElementById('root').innerHTML = SIGNS.map((t, i) => `<div class="page">${board(i, t)}</div>`).join('');
+
+// shrink any label wider than the panel allows
+document.fonts.ready.then(() => {
+  document.querySelectorAll('text.label').forEach(el => {
+    const max = 860, w = el.getComputedTextLength();
+    if (w > max) el.setAttribute('font-size', (150 * max / w).toFixed(1));
+  });
+  document.body.dataset.ready = '1';
+});
+</script>
+</body>
+</html>
